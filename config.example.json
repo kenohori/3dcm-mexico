@@ -7,6 +7,7 @@
   "terrain": "/path/to/terrain.gpkg",
   "generate_roads": true,
   "city_blocks": "/path/to/manzana_a.shp",
+  "land_use": "/path/to/granja_a.shp,/path/to/ins_deportiv_a.shp",
   "roads_output": "/path/to/roads.gpkg",
   "study_area": "476634,2142300,482533.5,2149281",
   "terrain_obj": "/path/to/terrain.obj",

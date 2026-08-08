@@ -49,7 +49,7 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 
 1. **Download INEGI data** — the 1:50 000 vector topographic dataset, plus the higher-resolution DSM/DTM rasters available for parts of the country (in this paper, 1.5 m data around Mexico City).
 2. **Reorder tiles** (`reorder.py`) — a one-off script that renames/organises downloaded INEGI DTM tiles (strips `conjunto_de_datos`/`metadatos` wrappers, names folders by their 8-character tile code).
-3. **Road polygons** *(C++, from `manzana_a`)* — the city blocks from the topography are read, unioned with CGAL Boolean set operations, and the complement within the study area (the DSM tile extent, or a custom `study_area`) is taken as the road polygons. A first approximation classifies all remaining gaps as roads; classification by proximity to the `vialidad_l` line features is planned.
+3. **Road polygons** *(C++, from `manzana_a`)* — the city blocks from the topography are read and unioned (via GEOS through OGR), along with the water bodies (`--waterbody`) and any land-use features (`--land_use`, comma-separated paths, e.g. INEGI `granja_a`, `ins_deportiv_a`, `cementerio_a`, `area_publica_a`). The complement within the study area (the DSM tile extent, or a custom `study_area`) is taken as the road polygons, so water bodies and land-use areas become holes in the roads. A first approximation classifies the remaining gaps as roads; classification by proximity to the `vialidad_l` line features is planned.
 4. **Building footprints** *(partly manual)*:
    - Subtract the DTM from the DSM to get object heights, and mask areas where buildings should not exist (roads, railways, water streams, green areas, water bodies) to NODATA *(C++, `--mask_output`, using the available Road/WaterBody/PlantCover layers)*.
    - Region growing *(C++, `--grow_output`)* from seed points ≥ 10 m, with an adaptive height tolerance (15 m for buildings taller than 100 m, 0.75 m otherwise) and 4-connectivity.
@@ -119,6 +119,8 @@ elevadormx \
   --terrain  .../terrain.gpkg \
   --generate_roads true \
   --city_blocks .../manzana_a.shp \
+  --waterbody .../cuerpo_agua_a.shp \
+  --land_use .../granja_a.shp,.../ins_deportiv_a.shp,.../cementerio_a.shp \
   --roads_output .../roads.gpkg \
   --study_area 476634,2142300,482533.5,2149281 \
   --terrain_obj  .../terrain.obj \
@@ -136,6 +138,7 @@ The two raster paths (`--dsm`, `--dtm`) and the three output paths are required;
 | `--building`, `--waterbody`, `--plantcover`, `--road`, `--terrain` | Vector layer paths |
 | `--generate_roads` | Generate road polygons from city blocks instead of reading `--road` |
 | `--city_blocks` | INEGI `manzana_a` layer (city blocks) used for road generation |
+| `--land_use` | Comma-separated land-use polygon layers to exclude from roads (e.g. `granja_a`, `ins_deportiv_a`) |
 | `--roads_output` | Where to write the generated road polygons (`.gpkg`) |
 | `--study_area` | Bounds `x_min,y_min,x_max,y_max` to generate roads within (defaults to the DSM extent) |
 | `--terrain_obj`, `--obj`, `--cityjson` | Output paths (required) |
@@ -187,7 +190,7 @@ The following steps are still performed manually in QGIS and are intended to be 
 - [x] Boolean operations for road-polygon generation (city blocks only)
 - [x] DSM−DTM subtraction and NODATA masking of forbidden areas
 - [x] Region growing (`buildinggrower.py` → C++, `--grow_output`)
-- [ ] Include land-use and water features in the road-polygon union
+- [x] Include land-use and water features in the road-polygon union
 - [ ] Classify road polygons by proximity to `vialidad_l`/`via_ferrea_l` line features
 - [ ] Raster→polygon conversion and Visvalingam–Whyatt simplification
 - [ ] Raster→polygon conversion and Visvalingam–Whyatt simplification

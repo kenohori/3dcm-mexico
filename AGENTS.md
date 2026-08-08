@@ -30,7 +30,7 @@ The methodology:
 
 ## Build & run
 
-**macOS + Xcode only.** Depends on Homebrew `gdal`, `cgal`, `gmp`, `mpfr` (and `nlohmann-json` headers). The Xcode project links GDAL via the `libgdal.dylib` symlink in `/opt/homebrew/lib`, so it survives Homebrew upgrades; `gmp`/`mpfr` are needed by CGAL's exact kernel (used for the road-polygon Boolean operations).
+**macOS + Xcode only.** Depends on Homebrew `gdal`, `cgal`, `gmp`, `mpfr` (and `nlohmann-json` headers). The Xcode project links GDAL via the `libgdal.dylib` symlink in `/opt/homebrew/lib`, so it survives Homebrew upgrades; `gmp`/`mpfr` are needed by CGAL's exact kernel (used for the constrained triangulations; the road-polygon Boolean operations use GEOS through OGR).
 
 ```sh
 xcodebuild -project elevadormx/elevadormx.xcodeproj -scheme elevadormx \
@@ -52,7 +52,8 @@ The C++ tool accepts `--key value` CLI args and/or `--config <file.json>` (JSON 
 
 ## Gotchas & known issues
 
-- **`elevadormx` assumes pre-generated inputs.** It reads building footprints, water bodies, plant cover, and terrain from vector layers (`.gpkg`) — those are still done in Python/QGIS. Road polygons, however, can now be generated in-tool from the INEGI `manzana_a` city-block layer via CGAL Boolean set operations (`--generate_roads true`), skipping the `--road` input.
+- **`elevadormx` assumes pre-generated inputs.** It reads building footprints, water bodies, plant cover, and terrain from vector layers (`.gpkg`) — those are still done in Python/QGIS. Road polygons, however, can now be generated in-tool from the INEGI `manzana_a` city-block layer, optionally subtracting water bodies (`--waterbody`) and land-use layers (`--land_use`) via GEOS Boolean operations (`--generate_roads true`), skipping the `--road` input.
+- **Road-polygon Booleans use GEOS, not CGAL's exact kernel.** CGAL `Polygon_set_2` crashes with `res != EQUAL` on the shared/partially-collinear boundaries between INEGI water bodies and city blocks; GEOS (via OGR `UnionCascaded`/`Difference`) handles them robustly.
 - **Latent crash/UB paths exist and are being hardened** (empty point clouds, out-of-range percentile indexing, `map.polygons.front()` on empty maps). Always test with missing/bogus paths before trusting a run.
 - `Edge_map.h` is included but not instantiated in `main.cpp`; the bowtie wall-handling code in `create_vertical_walls` is commented out and references it.
 - `data/` is gitignored (multi-GB local rasters). Do not stage or commit it. `origin/main` may lag local commits.
