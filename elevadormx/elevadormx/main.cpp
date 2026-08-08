@@ -3,9 +3,12 @@
 #include <sstream>
 #include <string>
 #include <cstdlib>
+#include <deque>
 
 #include <ogrsf_frmts.h>
 #include <gdal_priv.h>
+#include <gdal_alg.h>
+#include <cpl_string.h>
 
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
@@ -113,6 +116,16 @@ struct Config {
   // Polygon lifting
   double building_height_percentile = 0.9;
   
+  // Building footprint extraction
+  std::string mask_output_path;
+  std::string building_mask_path;
+  std::string grow_output_path;
+  double seed_threshold = 10.0;
+  double tall_building_height = 100.0;
+  double tall_tolerance = 15.0;
+  double normal_tolerance = 0.75;
+  int minimum_region_area = 45;
+  
   // Quadtree index
   std::size_t bucket_size = 100;
   unsigned int maximum_depth = 10;
@@ -143,6 +156,14 @@ struct Config {
     else if (key == "dtm_search_radius") dtm_search_radius = std::stod(value);
     else if (key == "dtm_ratio_to_use") dtm_ratio_to_use = std::stod(value);
     else if (key == "building_height_percentile") building_height_percentile = std::stod(value);
+    else if (key == "mask_output") mask_output_path = value;
+    else if (key == "building_mask") building_mask_path = value;
+    else if (key == "grow_output") grow_output_path = value;
+    else if (key == "seed_threshold") seed_threshold = std::stod(value);
+    else if (key == "tall_building_height") tall_building_height = std::stod(value);
+    else if (key == "tall_tolerance") tall_tolerance = std::stod(value);
+    else if (key == "normal_tolerance") normal_tolerance = std::stod(value);
+    else if (key == "minimum_region_area") minimum_region_area = std::stoi(value);
     else if (key == "bucket_size") bucket_size = std::stoul(value);
     else if (key == "maximum_depth") maximum_depth = std::stoul(value);
     else if (key == "decimal_digits") decimal_digits = std::stoi(value);
@@ -184,6 +205,14 @@ struct Config {
     std::cout << "\tDTM search radius: " << dtm_search_radius << "\n";
     std::cout << "\tDTM ratio to use: " << dtm_ratio_to_use << "\n";
     std::cout << "\tBuilding height percentile: " << building_height_percentile << "\n";
+    std::cout << "\tMask output: " << mask_output_path << "\n";
+    std::cout << "\tBuilding mask: " << building_mask_path << "\n";
+    std::cout << "\tGrow output: " << grow_output_path << "\n";
+    std::cout << "\tSeed threshold: " << seed_threshold << "\n";
+    std::cout << "\tTall building height: " << tall_building_height << "\n";
+    std::cout << "\tTall tolerance: " << tall_tolerance << "\n";
+    std::cout << "\tNormal tolerance: " << normal_tolerance << "\n";
+    std::cout << "\tMinimum region area: " << minimum_region_area << "\n";
     std::cout << "\tQuadtree bucket size: " << bucket_size << "\n";
     std::cout << "\tQuadtree maximum depth: " << maximum_depth << "\n";
     std::cout << "\tDecimal digits: " << decimal_digits << "\n";
@@ -886,6 +915,274 @@ void generate_road_polygons(Config &config, Map &map) {
   }
 }
 
+// Check whether a raster value is NODATA (exact or within a relative tolerance)
+bool is_nodata_value(float value, int has_nodata, double nodata) {
+  if (!has_nodata) return false;
+  if (value == nodata) return true;
+  return std::abs(double(value)-nodata) <= 1e-6*std::max(std::abs(double(value)), std::abs(nodata));
+}
+
+// Compute the object-height raster (DSM minus DTM) and mask forbidden areas to NODATA
+void mask_building_areas(const Config &config, Map &map) {
+  const float nodata = -9999.0f;
+  
+  GDALDataset *dsm_dataset = (GDALDataset *)GDALOpen(config.dsm_path.c_str(), GA_ReadOnly);
+  if (!dsm_dataset) {
+    std::cerr << "Error: Could not open DSM dataset: " << config.dsm_path << std::endl;
+    return;
+  } GDALDataset *dtm_dataset = (GDALDataset *)GDALOpen(config.dtm_path.c_str(), GA_ReadOnly);
+  if (!dtm_dataset) {
+    std::cerr << "Error: Could not open DTM dataset: " << config.dtm_path << std::endl;
+    GDALClose(dsm_dataset);
+    return;
+  }
+  
+  const int width = dsm_dataset->GetRasterXSize();
+  const int height = dsm_dataset->GetRasterYSize();
+  double dsm_geotransform[6];
+  if (dsm_dataset->GetGeoTransform(dsm_geotransform) != CE_None) {
+    std::cerr << "Error: Could not get DSM geotransform." << std::endl;
+    GDALClose(dtm_dataset);
+    GDALClose(dsm_dataset);
+    return;
+  }
+  
+  GDALRasterBand *dsm_band = dsm_dataset->GetRasterBand(1);
+  GDALRasterBand *dtm_band = dtm_dataset->GetRasterBand(1);
+  const int dtm_width = dtm_dataset->GetRasterXSize();
+  const int dtm_height = dtm_dataset->GetRasterYSize();
+  double dtm_geotransform[6];
+  if (dtm_dataset->GetGeoTransform(dtm_geotransform) != CE_None) {
+    std::cerr << "Error: Could not get DTM geotransform." << std::endl;
+    GDALClose(dtm_dataset);
+    GDALClose(dsm_dataset);
+    return;
+  }
+  
+  float *dsm_data = new float[width*height];
+  float *dtm_data = new float[dtm_width*dtm_height];
+  float *heights = new float[width*height];
+  unsigned char *mask = new unsigned char[width*height]();
+  bool read_ok = true;
+  
+  if (dsm_band->RasterIO(GF_Read, 0, 0, width, height, dsm_data, width, height, GDT_Float32, 0, 0) != CE_None) {
+    std::cerr << "Error reading DSM raster data." << std::endl;
+    read_ok = false;
+  } else if (dtm_band->RasterIO(GF_Read, 0, 0, dtm_width, dtm_height, dtm_data, dtm_width, dtm_height, GDT_Float32, 0, 0) != CE_None) {
+    std::cerr << "Error reading DTM raster data." << std::endl;
+    read_ok = false;
+  }
+  
+  if (!read_ok) {
+    delete[] dsm_data; delete[] dtm_data; delete[] heights; delete[] mask;
+    GDALClose(dtm_dataset); GDALClose(dsm_dataset);
+    return;
+  }
+  
+  int dsm_has_nodata = 0;
+  double dsm_nodata = dsm_band->GetNoDataValue(&dsm_has_nodata);
+  int dtm_has_nodata = 0;
+  double dtm_nodata = dtm_band->GetNoDataValue(&dtm_has_nodata);
+  
+  // DSM and DTM from the same INEGI tile share a grid
+  const bool aligned = (dtm_width == width && dtm_height == height);
+  for (int row = 0; row < height; ++row) {
+    for (int col = 0; col < width; ++col) {
+      const int index = row*width + col;
+      const float dsm_value = dsm_data[index];
+      bool no_data = is_nodata_value(dsm_value, dsm_has_nodata, dsm_nodata) || std::isnan(dsm_value);
+      float dtm_value = 0.0f;
+      if (!no_data) {
+        if (aligned) {
+          dtm_value = dtm_data[index];
+        } else {
+          const double x = dsm_geotransform[0] + (col+0.5)*dsm_geotransform[1] + (row+0.5)*dsm_geotransform[2];
+          const double y = dsm_geotransform[3] + (col+0.5)*dsm_geotransform[4] + (row+0.5)*dsm_geotransform[5];
+          const double denominator = dtm_geotransform[1]*dtm_geotransform[5] - dtm_geotransform[2]*dtm_geotransform[4];
+          if (std::abs(denominator) < 1e-12) {
+            no_data = true;
+          } else {
+            const int dtm_col = (int)std::floor((dtm_geotransform[5]*(x-dtm_geotransform[0]) - dtm_geotransform[2]*(y-dtm_geotransform[3])) / denominator);
+            const int dtm_row = (int)std::floor((-dtm_geotransform[4]*(x-dtm_geotransform[0]) + dtm_geotransform[1]*(y-dtm_geotransform[3])) / denominator);
+            if (dtm_col < 0 || dtm_col >= dtm_width || dtm_row < 0 || dtm_row >= dtm_height) no_data = true;
+            else dtm_value = dtm_data[dtm_row*dtm_width + dtm_col];
+          }
+        }
+        if (is_nodata_value(dtm_value, dtm_has_nodata, dtm_nodata)) no_data = true;
+        if (std::isnan(dtm_value)) no_data = true;
+      }
+      heights[index] = no_data ? nodata : dsm_value - dtm_value;
+    }
+  }
+  
+  // Rasterize forbidden areas (Road, WaterBody, PlantCover) into a mask
+  std::vector<OGRGeometryH> geometries;
+  for (auto const &polygon: map.polygons) {
+    if (polygon.semantic_class != "Road" && polygon.semantic_class != "WaterBody" && polygon.semantic_class != "PlantCover") continue;
+    OGRPolygon *ogr_polygon = new OGRPolygon();
+    OGRLinearRing *ogr_outer = new OGRLinearRing();
+    for (auto const &point: polygon.outer_ring.points) ogr_outer->addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
+    if (!polygon.outer_ring.points.empty()) {
+      ogr_outer->addPoint(CGAL::to_double(polygon.outer_ring.points.front().x()), CGAL::to_double(polygon.outer_ring.points.front().y()));
+    } ogr_polygon->addRingDirectly(ogr_outer);
+    for (auto const &ring: polygon.inner_rings) {
+      OGRLinearRing *ogr_hole = new OGRLinearRing();
+      for (auto const &point: ring.points) ogr_hole->addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
+      if (!ring.points.empty()) ogr_hole->addPoint(CGAL::to_double(ring.points.front().x()), CGAL::to_double(ring.points.front().y()));
+      ogr_polygon->addRingDirectly(ogr_hole);
+    } geometries.push_back((OGRGeometryH)ogr_polygon);
+  }
+  std::cout << "Masking " << geometries.size() << " forbidden polygons." << std::endl;
+  
+  GDALDriver *mem_driver = GetGDALDriverManager()->GetDriverByName("MEM");
+  GDALDataset *mask_dataset = mem_driver->Create("", width, height, 1, GDT_Byte, NULL);
+  mask_dataset->SetGeoTransform(dsm_geotransform);
+  mask_dataset->SetProjection(dsm_dataset->GetProjectionRef());
+  GDALRasterBand *mask_band = mask_dataset->GetRasterBand(1);
+  double burn_values[] = {1.0};
+  int band_list[] = {1};
+  char **rasterize_options = NULL;
+  rasterize_options = CSLAddString(rasterize_options, "ALL_TOUCHED=TRUE");
+  if (GDALRasterizeGeometries((GDALDatasetH)mask_dataset, 1, band_list, (int)geometries.size(), geometries.data(), NULL, NULL, burn_values, rasterize_options, NULL, NULL) != CE_None) {
+    std::cerr << "Error: Could not rasterize forbidden areas." << std::endl;
+  } CSLDestroy(rasterize_options);
+  mask_band->RasterIO(GF_Read, 0, 0, width, height, mask, width, height, GDT_Byte, 0, 0);
+  GDALClose(mask_dataset);
+  
+  // Apply the mask and write the output
+  for (int index = 0; index < width*height; ++index) {
+    if (mask[index] != 0) heights[index] = nodata;
+  }
+  GDALDriver *gtiff_driver = GetGDALDriverManager()->GetDriverByName("GTiff");
+  GDALDataset *output_dataset = gtiff_driver->Create(config.mask_output_path.c_str(), width, height, 1, GDT_Float32, NULL);
+  if (!output_dataset) {
+    std::cerr << "Error: Could not create " << config.mask_output_path << std::endl;
+  } else {
+    output_dataset->SetGeoTransform(dsm_geotransform);
+    output_dataset->SetProjection(dsm_dataset->GetProjectionRef());
+    GDALRasterBand *output_band = output_dataset->GetRasterBand(1);
+    output_band->SetNoDataValue(nodata);
+    if (output_band->RasterIO(GF_Write, 0, 0, width, height, heights, width, height, GDT_Float32, 0, 0) != CE_None) {
+      std::cerr << "Error: Could not write mask raster." << std::endl;
+    } GDALClose(output_dataset);
+    std::cout << "Wrote masked height raster to " << config.mask_output_path << std::endl;
+  }
+  
+  delete[] dsm_data; delete[] dtm_data; delete[] heights; delete[] mask;
+  for (auto const &geometry: geometries) OGR_G_DestroyGeometry(geometry);
+  GDALClose(dtm_dataset);
+  GDALClose(dsm_dataset);
+}
+
+// Extract building footprints by region growing on the masked object-height raster
+void grow_building_footprints(const Config &config) {
+  const std::string mask_path = config.building_mask_path.empty() ? config.mask_output_path : config.building_mask_path;
+  if (mask_path.empty()) {
+    std::cerr << "Error: Region growing requires a masked heights raster (--mask_output or --building_mask)." << std::endl;
+    return;
+  }
+  
+  GDALDataset *dataset = (GDALDataset *)GDALOpen(mask_path.c_str(), GA_ReadOnly);
+  if (!dataset) {
+    std::cerr << "Error: Could not open masked raster: " << mask_path << std::endl;
+    return;
+  }
+  
+  const int width = dataset->GetRasterXSize();
+  const int height = dataset->GetRasterYSize();
+  double geotransform[6];
+  if (dataset->GetGeoTransform(geotransform) != CE_None) {
+    std::cerr << "Error: Could not get geotransform of " << mask_path << std::endl;
+    GDALClose(dataset);
+    return;
+  }
+  
+  GDALRasterBand *band = dataset->GetRasterBand(1);
+  int has_nodata = 0;
+  double nodata = band->GetNoDataValue(&has_nodata);
+  
+  float *heights = new float[width*height];
+  if (band->RasterIO(GF_Read, 0, 0, width, height, heights, width, height, GDT_Float32, 0, 0) != CE_None) {
+    std::cerr << "Error reading masked raster data." << std::endl;
+    delete[] heights;
+    GDALClose(dataset);
+    return;
+  }
+  
+  unsigned int *building_id = new unsigned int[width*height]();
+  unsigned int *region_stamp = new unsigned int[width*height]();
+  std::deque<int> queue;
+  std::vector<int> region_pixels;
+  unsigned int current_stamp = 0, n_buildings = 0;
+  
+  for (int row = 0; row < height; ++row) {
+    for (int col = 0; col < width; ++col) {
+      const int index = row*width + col;
+      if (building_id[index] != 0) continue;
+      const float seed_height = heights[index];
+      if (is_nodata_value(seed_height, has_nodata, nodata) || std::isnan(seed_height)) continue;
+      if (seed_height <= config.seed_threshold) continue;
+      
+      const float tolerance = (seed_height >= config.tall_building_height) ? config.tall_tolerance : config.normal_tolerance;
+      
+      ++current_stamp;
+      queue.clear();
+      queue.push_back(index);
+      region_stamp[index] = current_stamp;
+      region_pixels.clear();
+      region_pixels.push_back(index);
+      while (!queue.empty()) {
+        const int current_index = queue.front();
+        queue.pop_front();
+        const int current_row = current_index / width;
+        const int current_col = current_index % width;
+        const double current_height = heights[current_index];
+        const int neighbour_offsets[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
+        for (int neighbour = 0; neighbour < 4; ++neighbour) {
+          const int new_row = current_row + neighbour_offsets[neighbour][0];
+          const int new_col = current_col + neighbour_offsets[neighbour][1];
+          if (new_row < 0 || new_row >= height || new_col < 0 || new_col >= width) continue;
+          const int new_index = new_row*width + new_col;
+          if (region_stamp[new_index] == current_stamp) continue;
+          const double new_height = heights[new_index];
+          if (is_nodata_value(new_height, has_nodata, nodata) || std::isnan(new_height)) continue;
+          if (std::abs(new_height-current_height) <= tolerance) {
+            region_stamp[new_index] = current_stamp;
+            queue.push_back(new_index);
+            region_pixels.push_back(new_index);
+          }
+        }
+      }
+      
+      // Keep footprints with at least minimum_region_area pixels
+      if ((int)region_pixels.size()-1 >= config.minimum_region_area) {
+        ++n_buildings;
+        for (auto const &pixel: region_pixels) building_id[pixel] = n_buildings;
+      }
+    }
+  }
+  
+  std::cout << "Region growing found " << n_buildings << " building footprints." << std::endl;
+  
+  GDALDriver *gtiff_driver = GetGDALDriverManager()->GetDriverByName("GTiff");
+  GDALDataset *output_dataset = gtiff_driver->Create(config.grow_output_path.c_str(), width, height, 1, GDT_UInt32, NULL);
+  if (!output_dataset) {
+    std::cerr << "Error: Could not create " << config.grow_output_path << std::endl;
+  } else {
+    output_dataset->SetGeoTransform(geotransform);
+    output_dataset->SetProjection(dataset->GetProjectionRef());
+    GDALRasterBand *output_band = output_dataset->GetRasterBand(1);
+    output_band->SetNoDataValue(0);
+    if (output_band->RasterIO(GF_Write, 0, 0, width, height, building_id, width, height, GDT_UInt32, 0, 0) != CE_None) {
+      std::cerr << "Error: Could not write building labels." << std::endl;
+    } GDALClose(output_dataset);
+    std::cout << "Wrote building labels to " << config.grow_output_path << std::endl;
+  }
+  
+  delete[] heights; delete[] building_id; delete[] region_stamp;
+  GDALClose(dataset);
+}
+
 int main(int argc, const char * argv[]) {
   
   Config config;
@@ -1157,6 +1454,12 @@ int main(int argc, const char * argv[]) {
     
     GDALClose(dataset);
   }
+
+  // Mask forbidden areas in the DSM-DTM object-height raster
+  if (!config.mask_output_path.empty()) mask_building_areas(config, map);
+
+  // Extract building footprints by region growing on the masked heights
+  if (!config.grow_output_path.empty()) grow_building_footprints(config);
 
   // Basic polygon repair (pre-requisite for triangulation)
   std::vector<Polygon>::iterator current_polygon = map.polygons.begin();

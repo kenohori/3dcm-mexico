@@ -8,13 +8,13 @@ Guidance for AI agents (and humans) working in this repository.
 
 The methodology:
 1. INEGI 1:50k topographic vectors (`data/topo/`) provide city blocks, roads (as lines), water bodies, public areas, etc. Building footprints are **not** available — they are extracted from elevation data.
-2. Building footprints are extracted from a DSM by region growing (`buildinggrower.py`, currently Python), masked to exclude roads/green/water.
+2. Building footprints are extracted from a DSM by region growing (`grow_building_footprints` in `main.cpp`, ported from `buildinggrower.py`), masked to exclude roads/green/water (`mask_building_areas`).
 3. The C++ tool `elevadormx` reads the DSM/DTM rasters + vector layers, builds a simplified DTM TIN, repairs/triangulates polygons, lifts them to 3D (three rules), generates vertical walls, and writes OBJ + CityJSON.
 
 ## Repository layout
 
 ```
-├── buildinggrower.py          # Region-growing building footprint extraction (Python, Rasterio)
+├── buildinggrower.py          # Reference Python region-growing (superseded by C++ --grow_output)
 ├── reorder.py                 # One-off INEGI DTM tile reorganisation (Python, historical)
 ├── config.example.json        # Template for the C++ tool's CLI/config interface
 ├── elevadormx/

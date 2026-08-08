@@ -4,7 +4,7 @@ Automated creation of **3D city models of Mexican cities from open data**.
 
 This repository contains the code behind the paper *"Creating 3D city models of Mexican cities based on open data"* (K. Arroyo Ohori & J. Stoter). It takes open **INEGI** elevation and topographic data and produces a textured/coloured 3D model (Wavefront OBJ) and a semantically rich one (CityJSON) for an area, including buildings, roads, plant cover, water bodies and terrain.
 
-The work is partly based on [elevador](https://github.com/kenohori/elevador), which itself draws on the methodologies of [3dfier](https://tudelft3d.github.io/3dfier/) and City4CFD.
+The work is partly based on [elevador](https://github.com/kenohori/elevador), which itself draws on the methodologies of [3dfier](https://tudelft3d.github.io/3dfier/) and [City4CFD](https://github.com/tudelft3d/city4cfd).
 
 ---
 
@@ -51,9 +51,8 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 2. **Reorder tiles** (`reorder.py`) — a one-off script that renames/organises downloaded INEGI DTM tiles (strips `conjunto_de_datos`/`metadatos` wrappers, names folders by their 8-character tile code).
 3. **Road polygons** *(C++, from `manzana_a`)* — the city blocks from the topography are read, unioned with CGAL Boolean set operations, and the complement within the study area (the DSM tile extent, or a custom `study_area`) is taken as the road polygons. A first approximation classifies all remaining gaps as roads; classification by proximity to the `vialidad_l` line features is planned.
 4. **Building footprints** *(partly manual)*:
-   - Subtract the DTM from the DSM to get object heights.
-   - Mask areas where buildings should not exist (roads, railways, water streams, green areas, water bodies) to NODATA.
-   - Region growing (`buildinggrower.py`) from seed points ≥ 10 m, with an adaptive height tolerance (15 m for buildings taller than 100 m, 0.75 m otherwise) and 4-connectivity.
+   - Subtract the DTM from the DSM to get object heights, and mask areas where buildings should not exist (roads, railways, water streams, green areas, water bodies) to NODATA *(C++, `--mask_output`, using the available Road/WaterBody/PlantCover layers)*.
+   - Region growing *(C++, `--grow_output`)* from seed points ≥ 10 m, with an adaptive height tolerance (15 m for buildings taller than 100 m, 0.75 m otherwise) and 4-connectivity.
    - Keep only footprints ≥ 45 pixels (~100 m²).
    - Polygonise the labelled raster and simplify with Visvalingam–Whyatt (tolerance 3 m) *(manual in QGIS)*.
 5. **Preprocessing** *(C++)* — all polygons are repaired and triangulated (constrained Delaunay triangulation + odd-even interior/exterior labelling, per Ledoux et al. 2014). A simplified DTM is built as a TIN from points every 30 m, each set to the median of DTM points within a 120 m radius.
@@ -70,7 +69,7 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 
 ```
 3dcm-mexico/
-├── buildinggrower.py          # Region-growing building-footprint extraction (Python + Rasterio)
+├── buildinggrower.py          # Reference Python region-growing (superseded by C++ `--grow_output`)
 ├── reorder.py                 # One-off INEGI DTM tile reorganisation (Python)
 ├── elevadormx/                # Main C++ tool (Xcode project)
 │   └── elevadormx/
@@ -123,6 +122,8 @@ elevadormx \
   --roads_output .../roads.gpkg \
   --study_area 476634,2142300,482533.5,2149281 \
   --terrain_obj  .../terrain.obj \
+  --mask_output  .../buildings_masked.tif \
+  --grow_output  .../building_labels.tif \
   --obj      .../cdmx.obj \
   --cityjson .../cdmx.city.json
 ```
@@ -138,6 +139,10 @@ The two raster paths (`--dsm`, `--dtm`) and the three output paths are required;
 | `--roads_output` | Where to write the generated road polygons (`.gpkg`) |
 | `--study_area` | Bounds `x_min,y_min,x_max,y_max` to generate roads within (defaults to the DSM extent) |
 | `--terrain_obj`, `--obj`, `--cityjson` | Output paths (required) |
+| `--mask_output` | Write the object-height raster (DSM−DTM) with roads/water/green masked to NODATA |
+| `--building_mask` | Masked object-height raster to grow buildings from (defaults to `--mask_output` output) |
+| `--grow_output` | Write the region-growing building labels (uint32 raster) |
+| `--seed_threshold`, `--tall_building_height`, `--tall_tolerance`, `--normal_tolerance`, `--minimum_region_area` | Region-growing parameters |
 | `--dtm_cell_size`, `--dtm_search_radius`, `--dtm_ratio_to_use` | Simplified DTM TIN parameters |
 | `--building_height_percentile` | Building height percentile (flat lifting) |
 | `--bucket_size`, `--maximum_depth` | Quadtree tuning |
@@ -146,6 +151,8 @@ The two raster paths (`--dsm`, `--dtm`) and the three output paths are required;
 Build in Xcode, then run. Outputs are written to:
 
 - `terrain.obj` — simplified DTM TIN (debug/parameter tuning)
+- `buildings_masked.tif` — object heights (DSM−DTM) with roads/water/green masked to NODATA
+- `building_labels.tif` — region-growing output (uint32 building id per pixel)
 - `cdmx.obj` — full 3D model for visualisation
 - `cdmx.city.json` — CityJSON model with semantics
 
@@ -153,9 +160,10 @@ Build in Xcode, then run. Outputs are written to:
 
 | Parameter | Location | Purpose |
 |---|---|---|
-| `seed_threshold = 10.0` | `buildinggrower.py` | Minimum object height to seed a building |
-| `tolerance` 15.0 / 0.75 | `buildinggrower.py` | Region-growing height difference (tall vs. normal buildings) |
-| `minimum_area = 45` | `buildinggrower.py` | Minimum footprint size in pixels |
+| `seed_threshold = 10.0` | config / CLI | Minimum object height to seed a building |
+| `tall_building_height = 100.0` | config / CLI | Height above which the tall tolerance applies |
+| `tall_tolerance = 15.0` / `normal_tolerance = 0.75` | config / CLI | Region-growing height difference (tall vs. normal buildings) |
+| `minimum_region_area = 45` | config / CLI | Minimum footprint size in pixels |
 | `dtm_cell_size = 30.0` | config / CLI | Grid spacing of the simplified DTM TIN |
 | `dtm_search_radius = 120.0` | config / CLI | Radius around each TIN point |
 | `building_height_percentile = 0.9` | config / CLI | Building height percentile (flat lifting) |
@@ -169,6 +177,7 @@ Build in Xcode, then run. Outputs are written to:
 - Terrace-shaped buildings may be split into multiple footprints; adjacent same-height buildings may be merged.
 - 3D road structures (overpasses, interchanges) are not modelled — roads are set to DTM height.
 - The CityJSON writer stores the terrain under the (non-standard) type `Terrain`.
+- The `--mask_output` raster masks only the Road/WaterBody/PlantCover layers available to the tool; railway and water-stream corridors are not yet included.
 
 ## Roadmap / planned integration
 
@@ -176,14 +185,17 @@ The following steps are still performed manually in QGIS and are intended to be 
 
 - [x] CLI/configuration-file support (replace hardcoded paths)
 - [x] Boolean operations for road-polygon generation (city blocks only)
+- [x] DSM−DTM subtraction and NODATA masking of forbidden areas
+- [x] Region growing (`buildinggrower.py` → C++, `--grow_output`)
 - [ ] Include land-use and water features in the road-polygon union
 - [ ] Classify road polygons by proximity to `vialidad_l`/`via_ferrea_l` line features
-- [ ] DSM−DTM subtraction and NODATA masking of forbidden areas
-- [ ] Region growing (`buildinggrower.py`) in C++
+- [ ] Raster→polygon conversion and Visvalingam–Whyatt simplification
 - [ ] Raster→polygon conversion and Visvalingam–Whyatt simplification
 
 ## Citing
 
 If you use this work, please cite the paper:
 
-> Arroyo Ohori, K. and Stoter, J. *Creating 3D city models of Mexican cities based on open data*. (ISPRS abstract).
+> Arroyo Ohori, K. and Stoter, J.: Creating 3D city models of Mexican cities based on open data, Int. Arch. Photogramm. Remote Sens. Spatial Inf. Sci., XLVIII-3/W4-2025, 3–9, https://doi.org/10.5194/isprs-archives-XLVIII-3-W4-2025-3-2026, 2026.
+
+[Paper](https://isprs-archives.copernicus.org/articles/XLVIII-3-W4-2025/3/2026/) · [DOI](https://doi.org/10.5194/isprs-archives-XLVIII-3-W4-2025-3-2026)
