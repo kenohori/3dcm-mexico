@@ -49,7 +49,7 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 
 1. **Download INEGI data** — the 1:50 000 vector topographic dataset, plus the higher-resolution DSM/DTM rasters available for parts of the country (in this paper, 1.5 m data around Mexico City).
 2. **Reorder tiles** (`reorder.py`) — a one-off script that renames/organises downloaded INEGI DTM tiles (strips `conjunto_de_datos`/`metadatos` wrappers, names folders by their 8-character tile code).
-3. **Road polygons** *(manual)* — a Boolean union of city blocks and other areal types from the topography is computed; the complement is mostly roads, and remaining areas are classified by proximity to the linear features (roads/railways/water streams).
+3. **Road polygons** *(C++, from `manzana_a`)* — the city blocks from the topography are read, unioned with CGAL Boolean set operations, and the complement within the study area (the DSM tile extent, or a custom `study_area`) is taken as the road polygons. A first approximation classifies all remaining gaps as roads; classification by proximity to the `vialidad_l` line features is planned.
 4. **Building footprints** *(partly manual)*:
    - Subtract the DTM from the DSM to get object heights.
    - Mask areas where buildings should not exist (roads, railways, water streams, green areas, water bodies) to NODATA.
@@ -117,8 +117,11 @@ elevadormx \
   --building .../footprints.gpkg \
   --waterbody .../water\ bodies.gpkg \
   --plantcover .../plant\ cover.gpkg \
-  --road     .../roads.gpkg \
   --terrain  .../terrain.gpkg \
+  --generate_roads true \
+  --city_blocks .../manzana_a.shp \
+  --roads_output .../roads.gpkg \
+  --study_area 476634,2142300,482533.5,2149281 \
   --terrain_obj  .../terrain.obj \
   --obj      .../cdmx.obj \
   --cityjson .../cdmx.city.json
@@ -130,6 +133,10 @@ The two raster paths (`--dsm`, `--dtm`) and the three output paths are required;
 |---|---|
 | `--dsm`, `--dtm` | DSM / DTM raster paths (required) |
 | `--building`, `--waterbody`, `--plantcover`, `--road`, `--terrain` | Vector layer paths |
+| `--generate_roads` | Generate road polygons from city blocks instead of reading `--road` |
+| `--city_blocks` | INEGI `manzana_a` layer (city blocks) used for road generation |
+| `--roads_output` | Where to write the generated road polygons (`.gpkg`) |
+| `--study_area` | Bounds `x_min,y_min,x_max,y_max` to generate roads within (defaults to the DSM extent) |
 | `--terrain_obj`, `--obj`, `--cityjson` | Output paths (required) |
 | `--dtm_cell_size`, `--dtm_search_radius`, `--dtm_ratio_to_use` | Simplified DTM TIN parameters |
 | `--building_height_percentile` | Building height percentile (flat lifting) |
@@ -168,10 +175,12 @@ Build in Xcode, then run. Outputs are written to:
 The following steps are still performed manually in QGIS and are intended to be ported into the C++ tool:
 
 - [x] CLI/configuration-file support (replace hardcoded paths)
+- [x] Boolean operations for road-polygon generation (city blocks only)
+- [ ] Include land-use and water features in the road-polygon union
+- [ ] Classify road polygons by proximity to `vialidad_l`/`via_ferrea_l` line features
 - [ ] DSM−DTM subtraction and NODATA masking of forbidden areas
 - [ ] Region growing (`buildinggrower.py`) in C++
 - [ ] Raster→polygon conversion and Visvalingam–Whyatt simplification
-- [ ] Boolean operations for road-polygon generation
 
 ## Citing
 

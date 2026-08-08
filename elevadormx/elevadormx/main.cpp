@@ -1,5 +1,6 @@
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <cstdlib>
 
@@ -7,6 +8,10 @@
 #include <gdal_priv.h>
 
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
+#include <CGAL/Exact_predicates_exact_constructions_kernel.h>
+#include <CGAL/Polygon_2.h>
+#include <CGAL/Polygon_with_holes_2.h>
+#include <CGAL/Polygon_set_2.h>
 #include <CGAL/squared_distance_2.h>
 #include <CGAL/Constrained_Delaunay_triangulation_2.h>
 #include <CGAL/Triangulation_vertex_base_with_info_2.h>
@@ -20,6 +25,10 @@
 #include <nlohmann/json.hpp>
 
 typedef CGAL::Exact_predicates_inexact_constructions_kernel Kernel;
+typedef CGAL::Exact_predicates_exact_constructions_kernel Exact_kernel;
+typedef CGAL::Polygon_2<Exact_kernel> Exact_polygon;
+typedef CGAL::Polygon_with_holes_2<Exact_kernel> Exact_polygon_with_holes;
+typedef CGAL::Polygon_set_2<Exact_kernel> Exact_polygon_set;
 typedef CGAL::Exact_predicates_tag Tag;
 struct Vertex_info;
 typedef CGAL::Triangulation_vertex_base_with_info_2<Vertex_info, Kernel> Vertex_base;
@@ -111,6 +120,13 @@ struct Config {
   // Output precision
   int decimal_digits = 2;
   
+  // Road polygon generation
+  bool generate_roads = false;
+  std::string city_blocks_path;
+  std::string roads_output_path;
+  double study_x_min = 0.0, study_y_min = 0.0, study_x_max = 0.0, study_y_max = 0.0;
+  bool study_area_set = false;
+  
   // Apply a CLI/config-file key-value pair to this config
   void set(const std::string &key, const std::string &value) {
     if (key == "dsm") dsm_path = value;
@@ -130,7 +146,23 @@ struct Config {
     else if (key == "bucket_size") bucket_size = std::stoul(value);
     else if (key == "maximum_depth") maximum_depth = std::stoul(value);
     else if (key == "decimal_digits") decimal_digits = std::stoi(value);
-    else std::cerr << "Unknown config option: " << key << std::endl;
+    else if (key == "generate_roads") generate_roads = (value == "true" || value == "1");
+    else if (key == "city_blocks") city_blocks_path = value;
+    else if (key == "roads_output") roads_output_path = value;
+    else if (key == "study_area") {
+      // Format: x_min,y_min,x_max,y_max
+      std::stringstream value_stream(value);
+      std::string current_value;
+      std::getline(value_stream, current_value, ',');
+      study_x_min = std::stod(current_value);
+      std::getline(value_stream, current_value, ',');
+      study_y_min = std::stod(current_value);
+      std::getline(value_stream, current_value, ',');
+      study_x_max = std::stod(current_value);
+      std::getline(value_stream, current_value, ',');
+      study_y_max = std::stod(current_value);
+      study_area_set = true;
+    } else std::cerr << "Unknown config option: " << key << std::endl;
   }
   
   void print() const {
@@ -155,6 +187,13 @@ struct Config {
     std::cout << "\tQuadtree bucket size: " << bucket_size << "\n";
     std::cout << "\tQuadtree maximum depth: " << maximum_depth << "\n";
     std::cout << "\tDecimal digits: " << decimal_digits << "\n";
+    std::cout << "Road polygon generation:\n";
+    std::cout << "\tGenerate roads: " << (generate_roads ? "yes" : "no") << "\n";
+    if (generate_roads) {
+      std::cout << "\tCity blocks: " << city_blocks_path << "\n";
+      std::cout << "\tRoads output: " << roads_output_path << "\n";
+      std::cout << "\tStudy area: " << study_x_min << ", " << study_y_min << ", " << study_x_max << ", " << study_y_max << "\n";
+    }
   }
 };
 
@@ -700,6 +739,153 @@ void write_terrain_obj(const char *path, Triangulation &terrain) {
   } output_stream.close();
 }
 
+// Convert an OGR ring to a CGAL exact polygon
+Exact_polygon ring_to_exact_polygon(OGRLinearRing *ring) {
+  Exact_polygon polygon;
+  for (int current_vertex = 0; current_vertex < ring->getNumPoints(); ++current_vertex) {
+    polygon.push_back(Exact_kernel::Point_2(ring->getX(current_vertex), ring->getY(current_vertex)));
+  } if (polygon.size() > 1 && polygon[0] == polygon[polygon.size()-1]) polygon.erase(polygon.end()-1);
+  if (polygon.is_clockwise_oriented()) polygon.reverse_orientation();
+  return polygon;
+}
+
+// Convert a CGAL exact polygon-with-holes to a Map polygon (Kernel points)
+void exact_polygon_to_map_polygon(Polygon &map_polygon, const Exact_polygon_with_holes &exact_polygon) {
+  for (auto const &point: exact_polygon.outer_boundary()) {
+    map_polygon.outer_ring.points.emplace_back(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
+  } for (auto it = exact_polygon.holes_begin(); it != exact_polygon.holes_end(); ++it) {
+    map_polygon.inner_rings.emplace_back();
+    for (auto const &point: *it) {
+      map_polygon.inner_rings.back().points.emplace_back(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
+    }
+  }
+}
+
+// Generate road polygons: union of city blocks, then the complement within the study area
+void generate_road_polygons(Config &config, Map &map) {
+  if (config.city_blocks_path.empty()) {
+    std::cerr << "Error: generate_roads requires a city_blocks path." << std::endl;
+    return;
+  }
+  
+  GDALDataset *dataset = (GDALDataset*) GDALOpenEx(config.city_blocks_path.c_str(), GDAL_OF_READONLY, NULL, NULL, NULL);
+  if (dataset == NULL) {
+    std::cerr << "Error: Could not open city blocks dataset: " << config.city_blocks_path << std::endl;
+    return;
+  } std::cout << "Opening city blocks type: " << dataset->GetDriverName() << std::endl;
+  
+  // Union all city blocks
+  Exact_polygon_set city_blocks;
+  std::size_t n_blocks = 0;
+  for (auto &&input_layer: dataset->GetLayers()) {
+    input_layer->ResetReading();
+    input_layer->SetSpatialFilterRect(config.study_x_min, config.study_y_min, config.study_x_max, config.study_y_max);
+    
+    // Extract CRS from this layer
+    const OGRSpatialReference *spatial_reference = input_layer->GetSpatialRef();
+    if (spatial_reference != NULL) {
+      const char *authority = spatial_reference->GetAuthorityName(NULL);
+      if (authority != NULL) map.crs_authority = std::string(authority);
+      const char *code = spatial_reference->GetAuthorityCode(NULL);
+      if (code != NULL) map.crs_code = std::string(code);
+    }
+    
+    OGRFeature *input_feature;
+    while ((input_feature = input_layer->GetNextFeature()) != NULL) {
+      if (!input_feature->GetGeometryRef()) continue;
+      OGRwkbGeometryType geometry_type = wkbFlatten(input_feature->GetGeometryRef()->getGeometryType());
+      if (geometry_type == wkbPolygon) {
+        OGRPolygon *input_polygon = input_feature->GetGeometryRef()->toPolygon();
+        Exact_polygon_with_holes exact_polygon(ring_to_exact_polygon(input_polygon->getExteriorRing()));
+        for (int current_ring = 0; current_ring < input_polygon->getNumInteriorRings(); ++current_ring) {
+          exact_polygon.add_hole(ring_to_exact_polygon(input_polygon->getInteriorRing(current_ring)));
+        } city_blocks.insert(exact_polygon);
+        ++n_blocks;
+      } else if (geometry_type == wkbMultiPolygon) {
+        OGRMultiPolygon *input_multipolygon = input_feature->GetGeometryRef()->toMultiPolygon();
+        for (int current_polygon = 0; current_polygon < input_multipolygon->getNumGeometries(); ++current_polygon) {
+          OGRPolygon *input_polygon = input_multipolygon->getGeometryRef(current_polygon);
+          Exact_polygon_with_holes exact_polygon(ring_to_exact_polygon(input_polygon->getExteriorRing()));
+          for (int current_ring = 0; current_ring < input_polygon->getNumInteriorRings(); ++current_ring) {
+            exact_polygon.add_hole(ring_to_exact_polygon(input_polygon->getInteriorRing(current_ring)));
+          } city_blocks.insert(exact_polygon);
+          ++n_blocks;
+        }
+      }
+    }
+  }
+  GDALClose(dataset);
+  std::cout << "City blocks: " << n_blocks << std::endl;
+  
+  // Study area rectangle
+  Exact_polygon study_area;
+  study_area.push_back(Exact_kernel::Point_2(config.study_x_min, config.study_y_min));
+  study_area.push_back(Exact_kernel::Point_2(config.study_x_max, config.study_y_min));
+  study_area.push_back(Exact_kernel::Point_2(config.study_x_max, config.study_y_max));
+  study_area.push_back(Exact_kernel::Point_2(config.study_x_min, config.study_y_max));
+  
+  // Roads = study area minus union of city blocks
+  Exact_polygon_set roads(study_area);
+  roads.difference(city_blocks);
+  
+  // Collect resulting polygons
+  std::list<Exact_polygon_with_holes> road_polygons;
+  roads.polygons_with_holes(std::back_inserter(road_polygons));
+  std::cout << "Road polygons: " << road_polygons.size() << std::endl;
+  
+  // Write to output file if requested
+  if (!config.roads_output_path.empty()) {
+    GDALDriver *driver = GetGDALDriverManager()->GetDriverByName("GPKG");
+    if (driver == NULL) {
+      std::cerr << "Error: GPKG driver not available." << std::endl;
+    } else {
+      GDALDataset *output = driver->Create(config.roads_output_path.c_str(), 0, 0, 0, GDT_Unknown, NULL);
+      if (output == NULL) {
+        std::cerr << "Error: Could not create " << config.roads_output_path << std::endl;
+      } else {
+        OGRSpatialReference output_srs;
+        output_srs.SetFromUserInput(("EPSG:" + map.crs_code).c_str());
+        OGRLayer *layer = output->CreateLayer("Road", &output_srs, wkbPolygon, NULL);
+        if (layer != NULL) {
+          for (auto const &road_polygon: road_polygons) {
+            OGRFeature *feature = OGRFeature::CreateFeature(layer->GetLayerDefn());
+            OGRPolygon *ogr_polygon = new OGRPolygon();
+            OGRLinearRing *ogr_outer = new OGRLinearRing();
+            for (auto const &point: road_polygon.outer_boundary()) {
+              ogr_outer->addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
+            } if (road_polygon.outer_boundary().size() > 0) {
+              ogr_outer->addPoint(CGAL::to_double(road_polygon.outer_boundary().begin()->x()),
+                                  CGAL::to_double(road_polygon.outer_boundary().begin()->y()));
+            } ogr_polygon->addRingDirectly(ogr_outer);
+            for (auto it = road_polygon.holes_begin(); it != road_polygon.holes_end(); ++it) {
+              OGRLinearRing *ogr_hole = new OGRLinearRing();
+              for (auto const &point: *it) {
+                ogr_hole->addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
+              } if (it->size() > 0) {
+                ogr_hole->addPoint(CGAL::to_double(it->begin()->x()), CGAL::to_double(it->begin()->y()));
+              } ogr_polygon->addRingDirectly(ogr_hole);
+            }
+            feature->SetGeometryDirectly(ogr_polygon);
+            if (layer->CreateFeature(feature) != OGRERR_NONE) {
+              std::cerr << "Error: Could not write road polygon." << std::endl;
+            } OGRFeature::DestroyFeature(feature);
+          }
+        } GDALClose(output);
+        std::cout << "Wrote road polygons to " << config.roads_output_path << std::endl;
+      }
+    }
+  }
+  
+  // Inject into the map
+  std::size_t n_road = 0;
+  for (auto const &road_polygon: road_polygons) {
+    map.polygons.emplace_back();
+    map.polygons.back().id = "road-" + std::to_string(n_road++);
+    map.polygons.back().semantic_class = "Road";
+    exact_polygon_to_map_polygon(map.polygons.back(), road_polygon);
+  }
+}
+
 int main(int argc, const char * argv[]) {
   
   Config config;
@@ -739,6 +925,8 @@ int main(int argc, const char * argv[]) {
         config.set(entry.key(), entry.value().get<std::string>());
       } else if (entry.value().is_number()) {
         config.set(entry.key(), std::to_string(entry.value().get<double>()));
+      } else if (entry.value().is_boolean()) {
+        config.set(entry.key(), entry.value().get<bool>() ? "true" : "false");
       } else {
         std::cerr << "Unsupported config value type for " << entry.key() << std::endl;
       }
@@ -769,7 +957,7 @@ int main(int argc, const char * argv[]) {
   vector_paths["Building"] = config.building_path;
   vector_paths["WaterBody"] = config.waterbody_path;
   vector_paths["PlantCover"] = config.plantcover_path;
-  vector_paths["Road"] = config.road_path;
+  if (!config.generate_roads) vector_paths["Road"] = config.road_path;
   vector_paths["Terrain"] = config.terrain_path;
   
   Map map;
@@ -778,6 +966,8 @@ int main(int argc, const char * argv[]) {
   Triangulation dtm;
   
   GDALAllRegister();
+  
+  Kernel::FT dsm_x_min = 0.0, dsm_y_min = 0.0, dsm_x_max = 0.0, dsm_y_max = 0.0;
   
   for (auto const &path: raster_paths) {
     GDALDataset *dataset = (GDALDataset *)GDALOpen(path.second.c_str(), GA_ReadOnly);
@@ -801,6 +991,14 @@ int main(int argc, const char * argv[]) {
       GDALClose(dataset);
       std::cerr << "Could not get geotransform" << std::endl;
       continue;
+    }
+    
+    // Save the DSM extent to use as a default study area
+    if (path.first == "dsm") {
+      dsm_x_min = geotransform[0];
+      dsm_y_max = geotransform[3];
+      dsm_x_max = geotransform[0] + width*geotransform[1] + height*geotransform[2];
+      dsm_y_min = geotransform[3] + width*geotransform[4] + height*geotransform[5];
     }
     
     int hasNoData = 0;
@@ -870,6 +1068,18 @@ int main(int argc, const char * argv[]) {
         } vertex->info().z = elevations[std::floor(dtm_ratio_to_use*elevations.size())];
       }
     }
+  }
+  
+  // Generate road polygons from city blocks if requested
+  if (config.generate_roads) {
+    if (!config.study_area_set) {
+      config.study_x_min = dsm_x_min;
+      config.study_y_min = dsm_y_min;
+      config.study_x_max = dsm_x_max;
+      config.study_y_max = dsm_y_max;
+      config.study_area_set = true;
+      std::cout << "Using DSM extent as study area: " << config.study_x_min << ", " << config.study_y_min << ", " << config.study_x_max << ", " << config.study_y_max << std::endl;
+    } generate_road_polygons(config, map);
   }
   
   for (auto const &path: vector_paths) {

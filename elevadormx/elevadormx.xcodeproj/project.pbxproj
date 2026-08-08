@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		BE3188532E8C51A50075836C /* libgdal.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = BE3188522E8C51A50075836C /* libgdal.dylib */; };
 		BE5680ED2E8DF61600922B0A /* libgmp.10.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = BE5680EC2E8DF61600922B0A /* libgmp.10.dylib */; };
+		BF00000100000001 /* libmpfr.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = BF00000100000002 /* libmpfr.dylib */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -27,6 +28,7 @@
 		BE3188472E8C50DD0075836C /* elevadormx */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = elevadormx; sourceTree = BUILT_PRODUCTS_DIR; };
 		BE3188522E8C51A50075836C /* libgdal.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libgdal.dylib; path = ../../../../opt/homebrew/lib/libgdal.dylib; sourceTree = "<group>"; };
 		BE5680EC2E8DF61600922B0A /* libgmp.10.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libgmp.10.dylib; path = ../../../../opt/homebrew/Cellar/gmp/6.3.0/lib/libgmp.10.dylib; sourceTree = "<group>"; };
+		BF00000100000002 /* libmpfr.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libmpfr.dylib; path = ../../../../opt/homebrew/lib/libmpfr.dylib; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -43,6 +45,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				BE5680ED2E8DF61600922B0A /* libgmp.10.dylib in Frameworks */,
+				BF00000100000001 /* libmpfr.dylib in Frameworks */,
 				BE3188532E8C51A50075836C /* libgdal.dylib in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -71,6 +74,7 @@
 			isa = PBXGroup;
 			children = (
 				BE5680EC2E8DF61600922B0A /* libgmp.10.dylib */,
+				BF00000100000002 /* libmpfr.dylib */,
 				BE3188522E8C51A50075836C /* libgdal.dylib */,
 			);
 			name = Frameworks;
