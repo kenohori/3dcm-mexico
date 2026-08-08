@@ -1048,13 +1048,13 @@ void mask_building_areas(const Config &config, Map &map) {
     OGRPolygon *ogr_polygon = new OGRPolygon();
     OGRLinearRing *ogr_outer = new OGRLinearRing();
     for (auto const &point: polygon.outer_ring.points) ogr_outer->addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
-    if (!polygon.outer_ring.points.empty()) {
+    if (!polygon.outer_ring.points.empty() && polygon.outer_ring.points.back() != polygon.outer_ring.points.front()) {
       ogr_outer->addPoint(CGAL::to_double(polygon.outer_ring.points.front().x()), CGAL::to_double(polygon.outer_ring.points.front().y()));
     } ogr_polygon->addRingDirectly(ogr_outer);
     for (auto const &ring: polygon.inner_rings) {
       OGRLinearRing *ogr_hole = new OGRLinearRing();
       for (auto const &point: ring.points) ogr_hole->addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
-      if (!ring.points.empty()) ogr_hole->addPoint(CGAL::to_double(ring.points.front().x()), CGAL::to_double(ring.points.front().y()));
+      if (!ring.points.empty() && ring.points.back() != ring.points.front()) ogr_hole->addPoint(CGAL::to_double(ring.points.front().x()), CGAL::to_double(ring.points.front().y()));
       ogr_polygon->addRingDirectly(ogr_hole);
     } geometries.push_back((OGRGeometryH)ogr_polygon);
   }
@@ -1069,8 +1069,10 @@ void mask_building_areas(const Config &config, Map &map) {
   int band_list[] = {1};
   char **rasterize_options = NULL;
   rasterize_options = CSLAddString(rasterize_options, "ALL_TOUCHED=TRUE");
-  if (GDALRasterizeGeometries((GDALDatasetH)mask_dataset, 1, band_list, (int)geometries.size(), geometries.data(), NULL, NULL, burn_values, rasterize_options, NULL, NULL) != CE_None) {
-    std::cerr << "Error: Could not rasterize forbidden areas." << std::endl;
+  for (auto const &geometry: geometries) {
+    if (GDALRasterizeGeometries((GDALDatasetH)mask_dataset, 1, band_list, 1, &geometry, NULL, NULL, burn_values, rasterize_options, NULL, NULL) != CE_None) {
+      std::cerr << "Error: Could not rasterize forbidden area." << std::endl;
+    }
   } CSLDestroy(rasterize_options);
   mask_band->RasterIO(GF_Read, 0, 0, width, height, mask, width, height, GDT_Byte, 0, 0);
   GDALClose(mask_dataset);

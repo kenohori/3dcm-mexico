@@ -180,7 +180,7 @@ Build in Xcode, then run. Outputs are written to:
 - Terrace-shaped buildings may be split into multiple footprints; adjacent same-height buildings may be merged.
 - 3D road structures (overpasses, interchanges) are not modelled — roads are set to DTM height.
 - The CityJSON writer stores the terrain under the (non-standard) type `Terrain`.
-- The `--mask_output` raster masks only the Road/WaterBody/PlantCover layers available to the tool; railway and water-stream corridors are not yet included.
+- The `--mask_output` raster masks the Road/WaterBody/PlantCover layers passed to the tool (the mask is rasterized one geometry per `GDALRasterizeGeometries` call — multi-geometry calls silently drop polygons, see AGENTS.md); railway and water-stream corridors are not yet included.
 
 ## Roadmap / planned integration
 
@@ -192,7 +192,6 @@ The following steps are still performed manually in QGIS and are intended to be 
 - [x] Region growing (`buildinggrower.py` → C++, `--grow_output`)
 - [x] Include land-use and water features in the road-polygon union
 - [ ] Classify road polygons by proximity to `vialidad_l`/`via_ferrea_l` line features
-- [ ] Raster→polygon conversion and Visvalingam–Whyatt simplification
 - [ ] Raster→polygon conversion and Visvalingam–Whyatt simplification
 
 ## Citing

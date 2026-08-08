@@ -54,6 +54,8 @@ The C++ tool accepts `--key value` CLI args and/or `--config <file.json>` (JSON 
 
 - **`elevadormx` assumes pre-generated inputs.** It reads building footprints, water bodies, plant cover, and terrain from vector layers (`.gpkg`) — those are still done in Python/QGIS. Road polygons, however, can now be generated in-tool from the INEGI `manzana_a` city-block layer, optionally subtracting water bodies (`--waterbody`) and land-use layers (`--land_use`) via GEOS Boolean operations (`--generate_roads true`), skipping the `--road` input.
 - **Road-polygon Booleans use GEOS, not CGAL's exact kernel.** CGAL `Polygon_set_2` crashes with `res != EQUAL` on the shared/partially-collinear boundaries between INEGI water bodies and city blocks; GEOS (via OGR `UnionCascaded`/`Difference`) handles them robustly.
+- **`GDALRasterizeGeometries` silently drops polygons when called with many geometries at once.** Observed: only 9 of 54 PlantCover polygons got burned into the building mask, so green areas were not masked and region growing produced buildings inside them. `mask_building_areas` therefore rasterizes the mask **one geometry per call** (`nGeomCount=1`, matching how `gdal_rasterize`/`GDALRasterizeLayers` works). Do not revert to a single multi-geometry call.
+- **Do not re-close rings that are already closed** when building OGR geometries in `mask_building_areas`. OGR rings read from a source layer are closed, and re-adding the first point produces a degenerate duplicate closing point that makes some polygons fail to rasterize. Guard the closure with a `back() != front()` check (as the polygon-repair step does).
 - **Latent crash/UB paths exist and are being hardened** (empty point clouds, out-of-range percentile indexing, `map.polygons.front()` on empty maps). Always test with missing/bogus paths before trusting a run.
 - `Edge_map.h` is included but not instantiated in `main.cpp`; the bowtie wall-handling code in `create_vertical_walls` is commented out and references it.
 - `data/` is gitignored (multi-GB local rasters). Do not stage or commit it. `origin/main` may lag local commits.
@@ -64,7 +66,8 @@ The C++ tool accepts `--key value` CLI args and/or `--config <file.json>` (JSON 
 1. Build with `xcodebuild` (above).
 2. Smoke-test CLI: run with no args (expect graceful error), with `--config config.example.json` (expect config printout + graceful missing-file errors), and with a CLI override (must win over the config file).
 3. For pipeline changes, run against the real data in `data/` (DSM: `data/dsm/e14a39b3/e14a39b3_ms.bil`, DTM: `data/dtm/e14a39b3/e14a39b3_mt.bil`) and inspect outputs in a viewer.
-4. Validate CityJSON with a parser if touching the writer.
+4. When touching the building-mask pipeline, verify that forbidden areas are actually masked: rasterize the `Road`/`WaterBody`/`PlantCover` polygons and compare with the NODATA pixels of `--mask_output` (should be ~100% covered), and confirm `--grow_output` has no building labels inside green areas.
+5. Validate CityJSON with a parser if touching the writer.
 
 ## Git conventions
 
