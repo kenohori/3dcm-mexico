@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		BE3188532E8C51A50075836C /* libgdal.37.3.11.4.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = BE3188522E8C51A50075836C /* libgdal.37.3.11.4.dylib */; };
+		BE3188532E8C51A50075836C /* libgdal.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = BE3188522E8C51A50075836C /* libgdal.dylib */; };
 		BE5680ED2E8DF61600922B0A /* libgmp.10.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = BE5680EC2E8DF61600922B0A /* libgmp.10.dylib */; };
 /* End PBXBuildFile section */
 
@@ -25,7 +25,7 @@
 
 /* Begin PBXFileReference section */
 		BE3188472E8C50DD0075836C /* elevadormx */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = elevadormx; sourceTree = BUILT_PRODUCTS_DIR; };
-		BE3188522E8C51A50075836C /* libgdal.37.3.11.4.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libgdal.37.3.11.4.dylib; path = ../../../../opt/homebrew/Cellar/gdal/3.11.4/lib/libgdal.37.3.11.4.dylib; sourceTree = "<group>"; };
+		BE3188522E8C51A50075836C /* libgdal.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libgdal.dylib; path = ../../../../opt/homebrew/lib/libgdal.dylib; sourceTree = "<group>"; };
 		BE5680EC2E8DF61600922B0A /* libgmp.10.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libgmp.10.dylib; path = ../../../../opt/homebrew/Cellar/gmp/6.3.0/lib/libgmp.10.dylib; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -43,7 +43,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				BE5680ED2E8DF61600922B0A /* libgmp.10.dylib in Frameworks */,
-				BE3188532E8C51A50075836C /* libgdal.37.3.11.4.dylib in Frameworks */,
+				BE3188532E8C51A50075836C /* libgdal.dylib in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,7 +71,7 @@
 			isa = PBXGroup;
 			children = (
 				BE5680EC2E8DF61600922B0A /* libgmp.10.dylib */,
-				BE3188522E8C51A50075836C /* libgdal.37.3.11.4.dylib */,
+				BE3188522E8C51A50075836C /* libgdal.dylib */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -279,7 +279,7 @@
 				HEADER_SEARCH_PATHS = /opt/homebrew/include;
 				LIBRARY_SEARCH_PATHS = (
 					/opt/homebrew/lib,
-					/opt/homebrew/Cellar/gdal/3.11.4/lib,
+					/opt/homebrew/lib,
 					/opt/homebrew/Cellar/gmp/6.3.0/lib,
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -308,7 +308,7 @@
 				HEADER_SEARCH_PATHS = /opt/homebrew/include;
 				LIBRARY_SEARCH_PATHS = (
 					/opt/homebrew/lib,
-					/opt/homebrew/Cellar/gdal/3.11.4/lib,
+					/opt/homebrew/lib,
 					/opt/homebrew/Cellar/gmp/6.3.0/lib,
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";

@@ -1,0 +1,19 @@
+{
+  "dsm": "/path/to/dsm.bil",
+  "dtm": "/path/to/dtm.bil",
+  "building": "/path/to/footprints.gpkg",
+  "waterbody": "/path/to/water bodies.gpkg",
+  "plantcover": "/path/to/plant cover.gpkg",
+  "road": "/path/to/roads.gpkg",
+  "terrain": "/path/to/terrain.gpkg",
+  "terrain_obj": "/path/to/terrain.obj",
+  "obj": "/path/to/cdmx.obj",
+  "cityjson": "/path/to/cdmx.city.json",
+  "dtm_cell_size": 30.0,
+  "dtm_search_radius": 120.0,
+  "dtm_ratio_to_use": 0.5,
+  "building_height_percentile": 0.9,
+  "bucket_size": 100,
+  "maximum_depth": 10,
+  "decimal_digits": 2
+}

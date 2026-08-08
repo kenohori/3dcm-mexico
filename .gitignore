@@ -25,3 +25,6 @@ xcuserdata/
 # Build output directories
 build/
 DerivedData/
+
+# Local source data (INEGI rasters and vectors)
+data/

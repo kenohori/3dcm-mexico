@@ -1,4 +1,7 @@
 #include <iostream>
+#include <fstream>
+#include <string>
+#include <cstdlib>
 
 #include <ogrsf_frmts.h>
 #include <gdal_priv.h>
@@ -76,6 +79,85 @@ struct Map {
   std::string crs_authority, crs_code;
 };
 
+struct Config {
+  // Raster inputs
+  std::string dsm_path;
+  std::string dtm_path;
+  
+  // Vector inputs
+  std::string building_path;
+  std::string waterbody_path;
+  std::string plantcover_path;
+  std::string road_path;
+  std::string terrain_path;
+  
+  // Outputs
+  std::string terrain_obj_path;
+  std::string obj_path;
+  std::string cityjson_path;
+  
+  // Simplified DTM TIN generation
+  double dtm_cell_size = 30.0;
+  double dtm_search_radius = 120.0;
+  double dtm_ratio_to_use = 0.5;
+  
+  // Polygon lifting
+  double building_height_percentile = 0.9;
+  
+  // Quadtree index
+  std::size_t bucket_size = 100;
+  unsigned int maximum_depth = 10;
+  
+  // Output precision
+  int decimal_digits = 2;
+  
+  // Apply a CLI/config-file key-value pair to this config
+  void set(const std::string &key, const std::string &value) {
+    if (key == "dsm") dsm_path = value;
+    else if (key == "dtm") dtm_path = value;
+    else if (key == "building") building_path = value;
+    else if (key == "waterbody") waterbody_path = value;
+    else if (key == "plantcover") plantcover_path = value;
+    else if (key == "road") road_path = value;
+    else if (key == "terrain") terrain_path = value;
+    else if (key == "terrain_obj") terrain_obj_path = value;
+    else if (key == "obj") obj_path = value;
+    else if (key == "cityjson") cityjson_path = value;
+    else if (key == "dtm_cell_size") dtm_cell_size = std::stod(value);
+    else if (key == "dtm_search_radius") dtm_search_radius = std::stod(value);
+    else if (key == "dtm_ratio_to_use") dtm_ratio_to_use = std::stod(value);
+    else if (key == "building_height_percentile") building_height_percentile = std::stod(value);
+    else if (key == "bucket_size") bucket_size = std::stoul(value);
+    else if (key == "maximum_depth") maximum_depth = std::stoul(value);
+    else if (key == "decimal_digits") decimal_digits = std::stoi(value);
+    else std::cerr << "Unknown config option: " << key << std::endl;
+  }
+  
+  void print() const {
+    std::cout << "Rasters:\n";
+    std::cout << "\tDSM: " << dsm_path << "\n";
+    std::cout << "\tDTM: " << dtm_path << "\n";
+    std::cout << "Vector layers:\n";
+    std::cout << "\tBuilding: " << building_path << "\n";
+    std::cout << "\tWaterBody: " << waterbody_path << "\n";
+    std::cout << "\tPlantCover: " << plantcover_path << "\n";
+    std::cout << "\tRoad: " << road_path << "\n";
+    std::cout << "\tTerrain: " << terrain_path << "\n";
+    std::cout << "Outputs:\n";
+    std::cout << "\tTerrain OBJ: " << terrain_obj_path << "\n";
+    std::cout << "\tOBJ: " << obj_path << "\n";
+    std::cout << "\tCityJSON: " << cityjson_path << "\n";
+    std::cout << "Parameters:\n";
+    std::cout << "\tDTM cell size: " << dtm_cell_size << "\n";
+    std::cout << "\tDTM search radius: " << dtm_search_radius << "\n";
+    std::cout << "\tDTM ratio to use: " << dtm_ratio_to_use << "\n";
+    std::cout << "\tBuilding height percentile: " << building_height_percentile << "\n";
+    std::cout << "\tQuadtree bucket size: " << bucket_size << "\n";
+    std::cout << "\tQuadtree maximum depth: " << maximum_depth << "\n";
+    std::cout << "\tDecimal digits: " << decimal_digits << "\n";
+  }
+};
+
 void label_polygon(Polygon &polygon) {
   for (auto const &current_face: polygon.triangulation.finite_face_handles()) {
     current_face->info().processed = false;
@@ -105,8 +187,8 @@ void label_polygon(Polygon &polygon) {
   }
 }
 
-int write_3dcm_obj(const char *path, Map &map) {
-  const int decimal_digits = 2;
+int write_3dcm_obj(const char *path, Map &map, const Config &config) {
+  const int decimal_digits = config.decimal_digits;
   
   std::ofstream output_stream;
   std::string output_3dcm(path);
@@ -179,8 +261,8 @@ int write_3dcm_obj(const char *path, Map &map) {
   return 0;
 }
 
-int write_3dcm_cityjson(const char *path, Map &map) {
-  const int decimal_digits = 2;
+int write_3dcm_cityjson(const char *path, Map &map, const Config &config) {
+  const int decimal_digits = config.decimal_digits;
   
   Kernel::FT scale_factor = 1.0;
   for (int digit = 0; digit < decimal_digits; ++digit) scale_factor *= 0.1;
@@ -194,6 +276,10 @@ int write_3dcm_cityjson(const char *path, Map &map) {
   std::size_t num_polygons = 0;
   
   // Compute extent
+  if (map.polygons.empty()) {
+    std::cerr << "Error: No polygons to write to CityJSON." << std::endl;
+    return EXIT_FAILURE;
+  }
   Kernel::FT x_min = map.polygons.front().x_min;
   Kernel::FT x_max = map.polygons.front().x_max;
   Kernel::FT y_min = map.polygons.front().y_min;
@@ -296,10 +382,15 @@ int write_3dcm_cityjson(const char *path, Map &map) {
   return 0;
 }
 
-void index_point_cloud(Point_cloud &point_cloud, Point_index &index) {
+void index_point_cloud(Point_cloud &point_cloud, Point_index &index, const Config &config) {
   
-  const int bucket_size = 100;
-  const int maximum_depth = 10;
+  const int bucket_size = config.bucket_size;
+  const int maximum_depth = config.maximum_depth;
+  
+  if (point_cloud.empty()) {
+    std::cerr << "Warning: Empty point cloud, skipping quadtree index." << std::endl;
+    return;
+  }
   
   index.compute_extent(point_cloud);
   for (Point_cloud::const_iterator point_index = point_cloud.begin(); point_index != point_cloud.end(); ++point_index) index.insert_point(point_cloud, *point_index);
@@ -611,14 +702,75 @@ void write_terrain_obj(const char *path, Triangulation &terrain) {
 
 int main(int argc, const char * argv[]) {
   
+  Config config;
+  std::map<std::string, std::string> command_line_overrides;
+  
+  // Parse command line arguments (format: --key value, or --config <file>)
+  std::string config_file_path;
+  for (int arg = 1; arg < argc; ++arg) {
+    std::string key = argv[arg];
+    if (key == "--config") {
+      if (arg+1 >= argc) {
+        std::cerr << "Error: Missing value for --config" << std::endl;
+        return EXIT_FAILURE;
+      } config_file_path = argv[++arg];
+    } else if (key.rfind("--", 0) == 0) {
+      std::string option_key = key.substr(2);
+      if (arg+1 >= argc) {
+        std::cerr << "Error: Missing value for " << key << std::endl;
+        return EXIT_FAILURE;
+      } command_line_overrides[option_key] = argv[++arg];
+    } else {
+      std::cerr << "Error: Unknown argument: " << key << std::endl;
+      return EXIT_FAILURE;
+    }
+  }
+  
+  // Load config file (overrides defaults)
+  if (!config_file_path.empty()) {
+    std::ifstream config_file(config_file_path);
+    if (!config_file.is_open()) {
+      std::cerr << "Error: Could not open config file: " << config_file_path << std::endl;
+      return EXIT_FAILURE;
+    } nlohmann::json config_json;
+    config_file >> config_json;
+    for (auto &entry: config_json.items()) {
+      if (entry.value().is_string()) {
+        config.set(entry.key(), entry.value().get<std::string>());
+      } else if (entry.value().is_number()) {
+        config.set(entry.key(), std::to_string(entry.value().get<double>()));
+      } else {
+        std::cerr << "Unsupported config value type for " << entry.key() << std::endl;
+      }
+    }
+  }
+  
+  // Command line arguments override the config file
+  for (auto const &option: command_line_overrides) config.set(option.first, option.second);
+  
+  // Check required inputs
+  if (config.dsm_path.empty() || config.dtm_path.empty()) {
+    std::cerr << "Error: DSM and DTM paths are required (--dsm and --dtm)." << std::endl;
+    return EXIT_FAILURE;
+  }
+  
+  // Check required outputs
+  if (config.terrain_obj_path.empty() || config.obj_path.empty() || config.cityjson_path.empty()) {
+    std::cerr << "Error: Output paths are required (--terrain_obj, --obj and --cityjson)." << std::endl;
+    return EXIT_FAILURE;
+  }
+  
+  std::cout << "3DCM Mexico configuration:" << std::endl;
+  config.print();
+  
   std::map<std::string, std::string> vector_paths, raster_paths;
-  raster_paths["dsm"] = "/Users/ken/Downloads/3dcm cdmx/dsm/e14a39b3/e14a39b3_ms.bil";
-  raster_paths["dtm"] = "/Users/ken/Downloads/3dcm cdmx/dtm/e14a39b3/e14a39b3_mt.bil";
-  vector_paths["Building"] = "/Users/ken/Downloads/3dcm cdmx/cropped/footprints.gpkg";
-  vector_paths["WaterBody"] = "/Users/ken/Downloads/3dcm cdmx/cropped/water bodies.gpkg";
-  vector_paths["PlantCover"] = "/Users/ken/Downloads/3dcm cdmx/cropped/plant cover.gpkg";
-  vector_paths["Road"] = "/Users/ken/Downloads/3dcm cdmx/cropped/roads.gpkg";
-  vector_paths["Terrain"] = "/Users/ken/Downloads/3dcm cdmx/cropped/terrain.gpkg";
+  raster_paths["dsm"] = config.dsm_path;
+  raster_paths["dtm"] = config.dtm_path;
+  vector_paths["Building"] = config.building_path;
+  vector_paths["WaterBody"] = config.waterbody_path;
+  vector_paths["PlantCover"] = config.plantcover_path;
+  vector_paths["Road"] = config.road_path;
+  vector_paths["Terrain"] = config.terrain_path;
   
   Map map;
   Point_cloud dsm, dtm_points;
@@ -689,29 +841,34 @@ int main(int argc, const char * argv[]) {
     GDALClose(dataset);
   }
   
-  index_point_cloud(dtm_points, dtm_points_index);
-  index_point_cloud(dsm, dsm_index);
+  index_point_cloud(dtm_points, dtm_points_index, config);
+  index_point_cloud(dsm, dsm_index, config);
   
-  const Kernel::FT dtm_cell_size = 30.0;
-  const Kernel::FT dtm_search_radius = 120.0;
-  const Kernel::FT dtm_ratio_to_use = 0.5;
+  const Kernel::FT dtm_cell_size = config.dtm_cell_size;
+  const Kernel::FT dtm_search_radius = config.dtm_search_radius;
+  const Kernel::FT dtm_ratio_to_use = config.dtm_ratio_to_use;
   Kernel::FT squared_search_radius = dtm_search_radius*dtm_search_radius;
-  for (Kernel::FT x = dtm_points_index.x_min-0.5*dtm_search_radius; x < dtm_points_index.x_max+0.5*dtm_search_radius; x += dtm_cell_size) {
-    for (Kernel::FT y = dtm_points_index.y_min-0.5*dtm_search_radius; y < dtm_points_index.y_max+0.5*dtm_search_radius; y += dtm_cell_size) {
-      std::vector<Point_index *> intersected_nodes;
-      dtm_points_index.find_intersections(intersected_nodes, x-0.5*dtm_search_radius, x+0.5*dtm_search_radius, y-0.5*dtm_search_radius, y+0.5*dtm_search_radius);
-      std::vector<Kernel::FT> elevations;
-      for (auto const &node: intersected_nodes) {
-        for (auto const &point_index: node->points) {
-          Kernel::FT squared_2d_distance = (dtm_points.point(point_index).x()-x)*(dtm_points.point(point_index).x()-x) +
-                                           (dtm_points.point(point_index).y()-y)*(dtm_points.point(point_index).y()-y);
-          if (squared_2d_distance < squared_search_radius) {
-            elevations.push_back(dtm_points.point(point_index).z());
+  if (!dtm_points.empty()) {
+    for (Kernel::FT x = dtm_points_index.x_min-0.5*dtm_search_radius; x < dtm_points_index.x_max+0.5*dtm_search_radius; x += dtm_cell_size) {
+      for (Kernel::FT y = dtm_points_index.y_min-0.5*dtm_search_radius; y < dtm_points_index.y_max+0.5*dtm_search_radius; y += dtm_cell_size) {
+        std::vector<Point_index *> intersected_nodes;
+        dtm_points_index.find_intersections(intersected_nodes, x-0.5*dtm_search_radius, x+0.5*dtm_search_radius, y-0.5*dtm_search_radius, y+0.5*dtm_search_radius);
+        std::vector<Kernel::FT> elevations;
+        for (auto const &node: intersected_nodes) {
+          for (auto const &point_index: node->points) {
+            Kernel::FT squared_2d_distance = (dtm_points.point(point_index).x()-x)*(dtm_points.point(point_index).x()-x) +
+                                             (dtm_points.point(point_index).y()-y)*(dtm_points.point(point_index).y()-y);
+            if (squared_2d_distance < squared_search_radius) {
+              elevations.push_back(dtm_points.point(point_index).z());
+            }
           }
-        }
-      } std::sort(elevations.begin(), elevations.end());
-      Triangulation::Vertex_handle vertex = dtm.insert(Kernel::Point_2(x, y));
-      vertex->info().z = elevations[std::floor(dtm_ratio_to_use*elevations.size())];
+        } std::sort(elevations.begin(), elevations.end());
+        Triangulation::Vertex_handle vertex = dtm.insert(Kernel::Point_2(x, y));
+        if (elevations.empty()) {
+          vertex->info().z = 0.0;
+          continue;
+        } vertex->info().z = elevations[std::floor(dtm_ratio_to_use*elevations.size())];
+      }
     }
   }
   
@@ -727,7 +884,7 @@ int main(int argc, const char * argv[]) {
       input_layer->ResetReading();
       
       // Try to extract CRS from this layer
-      OGRSpatialReference *spatial_reference = input_layer->GetSpatialRef();
+      const OGRSpatialReference *spatial_reference = input_layer->GetSpatialRef();
       if (spatial_reference != NULL) {
         char *srs = (char *)CPLMalloc(10000*sizeof(char));
         spatial_reference->exportToPrettyWkt(&srs);
@@ -897,15 +1054,15 @@ int main(int argc, const char * argv[]) {
     }
   }
   
-  lift_flat_polygons("Building", map, dsm, dsm_index, 0.9);
+  lift_flat_polygons("Building", map, dsm, dsm_index, config.building_height_percentile);
   lift_polygon_vertices("Road", map, dsm, dsm_index, dtm);
   lift_polygons("PlantCover", map, dsm, dsm_index, dtm);
   lift_polygon_vertices("WaterBody", map, dsm, dsm_index, dtm);
   lift_polygon_vertices("Terrain", map, dsm, dsm_index, dtm);
   create_vertical_walls(map, dtm);
   
-  write_terrain_obj("/Users/ken/Downloads/terrain.obj", dtm);
-  write_3dcm_obj("/Users/ken/Downloads/cdmx.obj", map);
-  write_3dcm_cityjson("/Users/ken/Downloads/cdmx.city.json", map);
+  write_terrain_obj(config.terrain_obj_path.c_str(), dtm);
+  write_3dcm_obj(config.obj_path.c_str(), map, config);
+  write_3dcm_cityjson(config.cityjson_path.c_str(), map, config);
   return EXIT_SUCCESS;
 }

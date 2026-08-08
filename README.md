@@ -101,17 +101,40 @@ On macOS with Homebrew: `brew install gdal cgal nlohmann-json`. The Xcode projec
 
 ### C++ tool (`elevadormx`)
 
-The input/output paths are currently hardcoded at the top of `main()` in `elevadormx/elevadormx/main.cpp`. Adjust these to your data:
+Inputs and parameters can be supplied either as command-line arguments or through a JSON config file (see `config.example.json`). A copy of `config.example.json` is the recommended starting point:
 
-```cpp
-raster_paths["dsm"] = ".../e14a39b3_ms.bil";      // DSM raster
-raster_paths["dtm"] = ".../e14a39b3_mt.bil";      // DTM raster
-vector_paths["Building"]   = ".../footprints.gpkg";
-vector_paths["WaterBody"]  = ".../water bodies.gpkg";
-vector_paths["PlantCover"] = ".../plant cover.gpkg";
-vector_paths["Road"]       = ".../roads.gpkg";
-vector_paths["Terrain"]    = ".../terrain.gpkg";  // city blocks
+```sh
+cp config.example.json config.json   # edit the paths to your data
+elevadormx --config config.json
 ```
+
+Alternatively, pass everything on the command line. Command-line options override the config file:
+
+```sh
+elevadormx \
+  --dsm      .../e14a39b3_ms.bil \
+  --dtm      .../e14a39b3_mt.bil \
+  --building .../footprints.gpkg \
+  --waterbody .../water\ bodies.gpkg \
+  --plantcover .../plant\ cover.gpkg \
+  --road     .../roads.gpkg \
+  --terrain  .../terrain.gpkg \
+  --terrain_obj  .../terrain.obj \
+  --obj      .../cdmx.obj \
+  --cityjson .../cdmx.city.json
+```
+
+The two raster paths (`--dsm`, `--dtm`) and the three output paths are required; the vector layers are optional and skipped with a warning if omitted. The full set of recognised options mirrors the keys in `config.example.json`:
+
+| Option | Meaning |
+|---|---|
+| `--dsm`, `--dtm` | DSM / DTM raster paths (required) |
+| `--building`, `--waterbody`, `--plantcover`, `--road`, `--terrain` | Vector layer paths |
+| `--terrain_obj`, `--obj`, `--cityjson` | Output paths (required) |
+| `--dtm_cell_size`, `--dtm_search_radius`, `--dtm_ratio_to_use` | Simplified DTM TIN parameters |
+| `--building_height_percentile` | Building height percentile (flat lifting) |
+| `--bucket_size`, `--maximum_depth` | Quadtree tuning |
+| `--decimal_digits` | Output coordinate precision |
 
 Build in Xcode, then run. Outputs are written to:
 
@@ -126,10 +149,10 @@ Build in Xcode, then run. Outputs are written to:
 | `seed_threshold = 10.0` | `buildinggrower.py` | Minimum object height to seed a building |
 | `tolerance` 15.0 / 0.75 | `buildinggrower.py` | Region-growing height difference (tall vs. normal buildings) |
 | `minimum_area = 45` | `buildinggrower.py` | Minimum footprint size in pixels |
-| `dtm_cell_size = 30.0` | `main.cpp` | Grid spacing of the simplified DTM TIN |
-| `dtm_search_radius = 120.0` | `main.cpp` | Radius around each TIN point |
-| `ratio_to_use = 0.9` | `main.cpp` | Building height percentile (flat lifting) |
-| `bucket_size` / `maximum_depth` | `main.cpp` | Quadtree tuning |
+| `dtm_cell_size = 30.0` | config / CLI | Grid spacing of the simplified DTM TIN |
+| `dtm_search_radius = 120.0` | config / CLI | Radius around each TIN point |
+| `building_height_percentile = 0.9` | config / CLI | Building height percentile (flat lifting) |
+| `bucket_size` / `maximum_depth` | config / CLI | Quadtree tuning |
 
 ---
 
@@ -144,11 +167,11 @@ Build in Xcode, then run. Outputs are written to:
 
 The following steps are still performed manually in QGIS and are intended to be ported into the C++ tool:
 
+- [x] CLI/configuration-file support (replace hardcoded paths)
 - [ ] DSM−DTM subtraction and NODATA masking of forbidden areas
 - [ ] Region growing (`buildinggrower.py`) in C++
 - [ ] Raster→polygon conversion and Visvalingam–Whyatt simplification
 - [ ] Boolean operations for road-polygon generation
-- [ ] CLI/configuration-file support (replace hardcoded paths)
 
 ## Citing
 
