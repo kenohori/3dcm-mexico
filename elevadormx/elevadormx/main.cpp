@@ -216,7 +216,7 @@ int write_3dcm_cityjson(const char *path, Map &map) {
   cityjson["type"] = "CityJSON";
   cityjson["version"] = "1.1";
   cityjson["transform"] = nlohmann::json::object();
-  cityjson["transform"]["scale"] = {1.0, 1.0, 1.0};
+  cityjson["transform"]["scale"] = {scale_factor, scale_factor, scale_factor};
   cityjson["transform"]["translate"] = {x_min, y_min, z_min};
   cityjson["CityObjects"] = nlohmann::json::object();
   cityjson["vertices"] = nlohmann::json::array();

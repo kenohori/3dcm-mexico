@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# Build artifacts
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+
+# LaTeX/XeTeX intermediates
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.xdv
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Xcode
+xcuserdata/
+
+# Build output directories
+build/
+DerivedData/
