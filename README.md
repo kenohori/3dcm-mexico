@@ -6,7 +6,7 @@ This repository contains the code behind the paper *"Creating 3D city models of 
 
 The work is partly based on [elevador](https://github.com/kenohori/elevador), which itself draws on the methodologies of [3dfier](https://tudelft3d.github.io/3dfier/) and [City4CFD](https://github.com/tudelft3d/city4cfd).
 
-> **Note on the paper.** The published paper (see [Citing](#citing)) describes the implementation as it was at the time of writing. Since then, several steps it describes as manual — road-polygon Boolean operations, DSM−DTM masking, region growing, raster→polygon conversion and footprint simplification — have been folded into the C++ tool (see [Roadmap](#roadmap--planned-integration)). This README describes the current code.
+> **Note on the paper.** The published paper (see [Citing](#citing)) describes the implementation as it was at the time of writing. Since then, several steps it describes as manual — road-polygon Boolean operations, road classification from line layers, DSM−DTM masking, region growing, raster→polygon conversion and footprint simplification — have been folded into the C++ tool. This README describes the current code.
 
 ---
 
@@ -55,7 +55,7 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 
 1. **Download INEGI data** — the 1:50 000 vector topographic dataset, plus the higher-resolution DSM/DTM rasters available for parts of the country (in this paper, 1.5 m data around Mexico City).
 2. **Reorder tiles** — a one-off manual step that renames/organises downloaded INEGI DTM tiles (strips `conjunto_de_datos`/`metadatos` wrappers, names folders by their 8-character tile code).
-3. **Road polygons** *(C++, from `manzana_a`)* — the city blocks from the topography are read and unioned (via GEOS through OGR), along with the water bodies (`--waterbody`) and any land-use features (`--land_use`, comma-separated paths, e.g. INEGI `granja_a`, `ins_deportiv_a`, `cementerio_a`, `area_publica_a`). The complement within the study area (the DSM tile extent, or a custom `study_area`) is taken as the road polygons, so water bodies and land-use areas become holes in the roads. The gaps are then classified by proximity to the INEGI line layers (`--road_lines`/`vialidad_l` → Road, `--railway_lines`/`via_ferrea_l` → Railway, `--stream_lines`/`corriente_ag_l` → WaterBody): each gap gets the semantic class of its nearest line (within `line_classification_distance`, default 50 m), with the nearest line's attributes attached to the CityJSON object; gaps with no nearby line (or no line layers given) keep the Road default.
+3. **Road polygons** *(C++, from `manzana_a`)* — the city blocks from the topography are read and unioned (via GEOS through OGR), along with the water bodies (`--waterbody`) and any land-use features (`--land_use`, comma-separated paths, e.g. INEGI `granja_a`, `ins_deportiv_a`, `cementerio_a`, `area_publica_a`). The complement within the study area (the DSM tile extent, or a custom `study_area`) is taken as the road polygons, so water bodies and land-use areas become holes in the roads. The road area is then classified against the INEGI line layers (`--road_lines`/`vialidad_l` → Road, `--railway_lines`/`via_ferrea_l` → Railway, `--stream_lines`/`corriente_ag_l` → WaterBody): the lines are noded into segments at their mutual intersections, each triangle of the road triangulation is assigned the class of its nearest segment (within `line_classification_distance`, default 50 m), and adjacent triangles sharing a segment are merged into polygons carrying that segment's class and attributes in the CityJSON object; triangles with no nearby segment (or with no line layers given) keep the Road default. Area water bodies (lakes/ponds) are not derived from the line layers — provide them as a vector layer via `--waterbody` (e.g. INEGI `cuerpo_agua_a`) to load them into the model as `WaterBody` objects.
 4. **Building footprints** *(C++)*:
    - Subtract the DTM from the DSM to get object heights, and mask areas where buildings should not exist (roads, railways, water streams, green areas, water bodies) to NODATA *(C++, `--mask_output`, using the available Road/WaterBody/PlantCover layers)*.
    - Region growing *(C++, `--grow_output`)* from seed points ≥ 10 m, with an adaptive height tolerance (15 m for buildings taller than 100 m, 0.75 m otherwise) and 4-connectivity.
@@ -143,9 +143,9 @@ The two raster paths (`--dsm`, `--dtm`) and the three output paths are required;
 | `--generate_roads` | Generate road polygons from city blocks instead of reading `--road` |
 | `--city_blocks` | INEGI `manzana_a` layer (city blocks) used for road generation |
 | `--land_use` | Comma-separated land-use polygon layers to exclude from roads (e.g. `granja_a`, `ins_deportiv_a`) |
-| `--road_lines`, `--railway_lines`, `--stream_lines` | INEGI line layers (`vialidad_l`, `via_ferrea_l`, `corriente_ag_l`) used to classify the generated gaps as Road/Railway/WaterBody |
-| `--line_classification_distance` | Max distance (m) from a gap to a line for it to be classified by that line (default 50) |
-| `--roads_output` | Where to write the generated road polygons (`.gpkg`, with a `class` attribute) |
+| `--road_lines`, `--railway_lines`, `--stream_lines` | INEGI line layers (`vialidad_l`, `via_ferrea_l`, `corriente_ag_l`) noded into segments and used to classify the road area as Road/Railway/WaterBody |
+| `--line_classification_distance` | Max distance (m) from a road triangle to a line segment for it to be classified by that segment (default 50) |
+| `--roads_output` | Where to write the generated road polygons (`.gpkg`, with a `class` attribute plus the line feature attributes) |
 | `--study_area` | Bounds `x_min,y_min,x_max,y_max` to generate roads within (defaults to the DSM extent) |
 | `--terrain_obj`, `--obj`, `--cityjson` | Output paths (required) |
 | `--mask_output` | Write the object-height raster (DSM−DTM) with roads/water/green masked to NODATA |
@@ -192,20 +192,7 @@ Build in Xcode, then run. Outputs are written to:
 - 3D road structures (overpasses, interchanges) are not modelled — roads are set to DTM height.
 - The CityJSON writer stores the terrain under the (non-standard) type `Terrain`.
 - The `--mask_output` raster masks the Road/Railway/WaterBody/PlantCover polygons in the model (the mask is rasterized one geometry per `GDALRasterizeGeometries` call — multi-geometry calls silently drop polygons, see AGENTS.md); railway and water-stream corridors are only masked when they are classified from the line layers (or provided as vector layers).
-- Road classification assigns each generated gap a single semantic class by proximity to the nearest line; in dense city blocks the road complement forms one large connected polygon, so gaps containing both a road and a railway/stream line keep the Road class (ties go to Road).
-
-## Roadmap / planned integration
-
-The following steps are still performed manually in QGIS and are intended to be ported into the C++ tool:
-
-- [x] CLI/configuration-file support (replace hardcoded paths)
-- [x] Boolean operations for road-polygon generation (city blocks only)
-- [x] DSM−DTM subtraction and NODATA masking of forbidden areas
-- [x] Region growing (→ C++, `--grow_output`)
-- [x] Include land-use and water features in the road-polygon union
-- [x] Classify road polygons by proximity to `vialidad_l`/`via_ferrea_l` line features
-- [x] Raster→polygon conversion (`--buildings_output`)
-- [x] Visvalingam–Whyatt simplification of building footprints (`--simplify_tolerance`)
+- Road classification decides ties in favour of Road (checked first), and only the linear water features (streams) are derived from the line layers — area water bodies (lakes/ponds) must be supplied as a `--waterbody` vector layer (e.g. INEGI `cuerpo_agua_a`).
 
 ## Citing
 
