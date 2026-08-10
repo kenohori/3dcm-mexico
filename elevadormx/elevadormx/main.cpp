@@ -836,10 +836,11 @@ void read_polygon_features(GDALDataset *dataset, const Config &config, OGRMultiP
 }
 
 // Read all polygon features from a dataset into the map with the given semantic class
-std::size_t read_polygon_layer(GDALDataset *dataset, const std::string &semantic_class, Map &map) {
+std::size_t read_polygon_layer(GDALDataset *dataset, const std::string &semantic_class, Map &map, const Config &config) {
   std::size_t n_polygons = 0;
   for (auto &&input_layer: dataset->GetLayers()) {
     input_layer->ResetReading();
+    if (config.study_area_set) input_layer->SetSpatialFilterRect(config.study_x_min, config.study_y_min, config.study_x_max, config.study_y_max);
     
     // Try to extract CRS from this layer
     const OGRSpatialReference *spatial_reference = input_layer->GetSpatialRef();
@@ -2049,7 +2050,7 @@ int main(int argc, const char * argv[]) {
       std::cerr << "Error: Could not open " << path.first << " dataset: " << path.second << std::endl;
       continue;
     } std::cout << "Opening " << path.first << " type: " << dataset->GetDriverName() << std::endl;
-    std::size_t n_polygons = read_polygon_layer(dataset, path.first, map);
+    std::size_t n_polygons = read_polygon_layer(dataset, path.first, map, config);
     std::cout << "Loaded " << n_polygons << " " << path.first << " polygons." << std::endl;
     GDALClose(dataset);
   }
@@ -2066,7 +2067,7 @@ int main(int argc, const char * argv[]) {
     if (dataset == NULL) {
       std::cerr << "Error: Could not open generated building footprints: " << config.buildings_output_path << std::endl;
     } else {
-      std::size_t n_generated_buildings = read_polygon_layer(dataset, "Building", map);
+      std::size_t n_generated_buildings = read_polygon_layer(dataset, "Building", map, config);
       std::cout << "Loaded " << n_generated_buildings << " generated building footprints into the model." << std::endl;
       GDALClose(dataset);
     }
