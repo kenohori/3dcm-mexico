@@ -4,6 +4,8 @@
 #include <string>
 #include <cstdlib>
 #include <deque>
+#include <queue>
+#include <functional>
 
 #include <ogrsf_frmts.h>
 #include <gdal_priv.h>
@@ -119,6 +121,9 @@ struct Config {
   double normal_tolerance = 0.75;
   int minimum_region_area = 45;
   
+  // Building footprint simplification (Visvalingam–Whyatt, effective-area tolerance in metres; 0 disables)
+  double simplify_tolerance = 3.0;
+  
   // Quadtree index
   std::size_t bucket_size = 100;
   unsigned int maximum_depth = 10;
@@ -159,6 +164,7 @@ struct Config {
     else if (key == "tall_tolerance") tall_tolerance = std::stod(value);
     else if (key == "normal_tolerance") normal_tolerance = std::stod(value);
     else if (key == "minimum_region_area") minimum_region_area = std::stoi(value);
+    else if (key == "simplify_tolerance") simplify_tolerance = std::stod(value);
     else if (key == "bucket_size") bucket_size = std::stoul(value);
     else if (key == "maximum_depth") maximum_depth = std::stoul(value);
     else if (key == "decimal_digits") decimal_digits = std::stoi(value);
@@ -210,6 +216,7 @@ struct Config {
     std::cout << "\tTall tolerance: " << tall_tolerance << "\n";
     std::cout << "\tNormal tolerance: " << normal_tolerance << "\n";
     std::cout << "\tMinimum region area: " << minimum_region_area << "\n";
+    std::cout << "\tSimplify tolerance: " << simplify_tolerance << "\n";
     std::cout << "\tQuadtree bucket size: " << bucket_size << "\n";
     std::cout << "\tQuadtree maximum depth: " << maximum_depth << "\n";
     std::cout << "\tDecimal digits: " << decimal_digits << "\n";
@@ -1023,6 +1030,68 @@ bool is_nodata_value(float value, int has_nodata, double nodata) {
   return std::abs(double(value)-nodata) <= 1e-6*std::max(std::abs(double(value)), std::abs(nodata));
 }
 
+// Visvalingam–Whyatt simplification of a closed ring (first == last), removing points whose effective triangle area is below the tolerance
+void simplify_ring_vw(std::vector<Kernel::Point_2> &ring, Kernel::FT tolerance) {
+  if (ring.empty()) return;
+  if (ring.front() != ring.back()) ring.push_back(ring.front());
+  const std::size_t n = ring.size()-1;
+  if (n < 4) return;
+  
+  // Effective area of the triangle (prev, i, next) in the ring
+  auto effective_area = [&](std::size_t i) -> double {
+    const std::size_t prev = (i+n-1) % n;
+    const std::size_t next = (i+1) % n;
+    const double ax = CGAL::to_double(ring[prev].x());
+    const double ay = CGAL::to_double(ring[prev].y());
+    const double bx = CGAL::to_double(ring[i].x());
+    const double by = CGAL::to_double(ring[i].y());
+    const double cx = CGAL::to_double(ring[next].x());
+    const double cy = CGAL::to_double(ring[next].y());
+    return 0.5*std::abs((bx-ax)*(cy-ay) - (by-ay)*(cx-ax));
+  };
+  
+  std::vector<double> areas(n);
+  std::priority_queue<std::pair<double, std::size_t>, std::vector<std::pair<double, std::size_t>>, std::greater<>> heap;
+  for (std::size_t i = 0; i < n; ++i) {
+    areas[i] = effective_area(i);
+    heap.push({areas[i], i});
+  }
+  
+  std::vector<bool> removed(n, false);
+  std::size_t remaining = n;
+  while (remaining > 3) {
+    while (!heap.empty() && (removed[heap.top().second] || heap.top().first != areas[heap.top().second])) heap.pop();
+    if (heap.empty()) break;
+    const std::size_t i = heap.top().second;
+    const double min_area = heap.top().first;
+    heap.pop();
+    if (min_area > tolerance) break;
+    removed[i] = true;
+    --remaining;
+    
+    // Recompute the effective areas of the neighbours of the removed point
+    std::size_t prev = (i+n-1) % n;
+    while (removed[prev]) prev = (prev+n-1) % n;
+    std::size_t next = (i+1) % n;
+    while (removed[next]) next = (next+1) % n;
+    areas[prev] = effective_area(prev);
+    areas[next] = effective_area(next);
+    heap.push({areas[prev], prev});
+    heap.push({areas[next], next});
+  }
+  
+  if (remaining == n) return;
+  std::vector<Kernel::Point_2> simplified;
+  simplified.reserve(remaining+1);
+  for (std::size_t i = 0; i < n; ++i) {
+    if (!removed[i]) simplified.push_back(ring[i]);
+  }
+  if (simplified.size() >= 3) {
+    simplified.push_back(simplified.front());
+    ring = std::move(simplified);
+  }
+}
+
 // Compute the object-height raster (DSM minus DTM) and mask forbidden areas to NODATA
 void mask_building_areas(const Config &config, Map &map) {
   const float nodata = -9999.0f;
@@ -1594,6 +1663,12 @@ int main(int argc, const char * argv[]) {
         std::cout << "Warning: Last point != first. Adding it again at the end..." << std::endl;
         ring.points.push_back(ring.points.front());
       }
+    }
+    
+    // Simplify building footprint rings (Visvalingam–Whyatt)
+    if (current_polygon->semantic_class == "Building" && config.simplify_tolerance > 0.0) {
+      simplify_ring_vw(current_polygon->outer_ring.points, config.simplify_tolerance);
+      for (auto &ring: current_polygon->inner_rings) simplify_ring_vw(ring.points, config.simplify_tolerance);
     }
     
     // Delete degenerate polygons and rings

@@ -6,7 +6,7 @@ This repository contains the code behind the paper *"Creating 3D city models of 
 
 The work is partly based on [elevador](https://github.com/kenohori/elevador), which itself draws on the methodologies of [3dfier](https://tudelft3d.github.io/3dfier/) and [City4CFD](https://github.com/tudelft3d/city4cfd).
 
-> **Note on the paper.** The published paper (see [Citing](#citing)) describes the implementation as it was at the time of writing. Since then, several steps it describes as manual — road-polygon Boolean operations, DSM−DTM masking, region growing and raster→polygon conversion — have been folded into the C++ tool (see [Roadmap](#roadmap--planned-integration)). This README describes the current code.
+> **Note on the paper.** The published paper (see [Citing](#citing)) describes the implementation as it was at the time of writing. Since then, several steps it describes as manual — road-polygon Boolean operations, DSM−DTM masking, region growing, raster→polygon conversion and footprint simplification — have been folded into the C++ tool (see [Roadmap](#roadmap--planned-integration)). This README describes the current code.
 
 ---
 
@@ -15,40 +15,40 @@ The work is partly based on [elevador](https://github.com/kenohori/elevador), wh
 The pipeline is summarised below. Currently the steps marked *manual* are performed in QGIS; the long-term goal is to fold them into the C++ tool so the whole process runs end-to-end.
 
 ```
-                    ┌─────────────────────────────────────────────────────────┐
+                    ┌──────────────────────────────────────────────────────────┐
                     │                      INEGI open data                     │
                     │  1:50k vector topography     DSM / DTM elevation rasters │
-                    └─────────────────────────────────────────────────────────┘
-                                       │
-                    ┌──────────────────┼───────────────────┐
-                    ▼                  ▼                   ▼
-                       city blocks +     other polygons          DSM / DTM
-                        land use /       (water bodies,          elevation
-                        water bdry        plant cover,            rasters
-                       (road holes)       terrain from
-                                          city blocks)
-                    │                  │                   │
-                    │                  │                   │
-                    └──────────────────┼───────────────────┘
-                                       ▼
-                    ┌──────────────────────────────────────────┐
-                    │   elevadormx (C++)                       │
-                    │  • generate road polygons (GEOS)         │
-                    │    (union of city blocks → complement)   │
-                    │  • extract building footprints           │
-                    │    (DSM−DTM mask + region growing)       │
-                    │  1. DTM → simplified TIN                 │
-                    │  2. repair + triangulate polygons (CGAL) │
-                    │  3. lift polygons to 3D                  │
-                    │     (flat / vertex / +pts)               │
-                    │  4. generate vertical walls              │
-                    │  5. write OBJ + CityJSON                 │
-                    └──────────────────────────────────────────┘
-                                       │
-                    ┌──────────────────┴───────────────────┐
-                    ▼                                          ▼
-             3D model (.obj)                         CityJSON (.city.json)
-               for viewing                         with semantics per object
+                    └──────────────────────────────────────────────────────────┘
+                                                 │
+                              ┌──────────────────┼───────────────────┐
+                              ▼                  ▼                   ▼
+                       city blocks +      other polygons         DSM / DTM
+                        land use /        (water bodies,         elevation
+                        water bdry         plant cover,           rasters
+                       (road holes)        terrain from
+                                           city blocks)
+                              │                  │                   │
+                              │                  │                   │
+                              └──────────────────┼───────────────────┘
+                                                 ▼
+                            ┌─────────────────────────────────────────┐
+                            │   elevadormx (C++)                      │
+                            │  • generate road polygons (GEOS)        │
+                            │    (union of city blocks → complement)  │
+                            │  • extract building footprints          │
+                            │    (DSM−DTM mask + region growing)      │
+                            │  1. DTM → simplified TIN                │
+                            │  2. repair + triangulate polygons (CGAL)│
+                            │  3. lift polygons to 3D                 │
+                            │     (flat / vertex / +pts)              │
+                            │  4. generate vertical walls             │
+                            │  5. write OBJ + CityJSON                │
+                            └─────────────────────────────────────────┘
+                                                 │
+                            ┌────────────────────┴────────────────────┐
+                            ▼                                         ▼
+                   3D model (.obj)                        CityJSON (.city.json)
+                      for viewing                        with semantics per object
 ```
 
 ### Pipeline stages
@@ -56,11 +56,11 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 1. **Download INEGI data** — the 1:50 000 vector topographic dataset, plus the higher-resolution DSM/DTM rasters available for parts of the country (in this paper, 1.5 m data around Mexico City).
 2. **Reorder tiles** — a one-off manual step that renames/organises downloaded INEGI DTM tiles (strips `conjunto_de_datos`/`metadatos` wrappers, names folders by their 8-character tile code).
 3. **Road polygons** *(C++, from `manzana_a`)* — the city blocks from the topography are read and unioned (via GEOS through OGR), along with the water bodies (`--waterbody`) and any land-use features (`--land_use`, comma-separated paths, e.g. INEGI `granja_a`, `ins_deportiv_a`, `cementerio_a`, `area_publica_a`). The complement within the study area (the DSM tile extent, or a custom `study_area`) is taken as the road polygons, so water bodies and land-use areas become holes in the roads. A first approximation classifies the remaining gaps as roads; classification by proximity to the `vialidad_l` line features is planned.
-4. **Building footprints** *(C++, except Visvalingam–Whyatt simplification)*:
+4. **Building footprints** *(C++)*:
    - Subtract the DTM from the DSM to get object heights, and mask areas where buildings should not exist (roads, railways, water streams, green areas, water bodies) to NODATA *(C++, `--mask_output`, using the available Road/WaterBody/PlantCover layers)*.
    - Region growing *(C++, `--grow_output`)* from seed points ≥ 10 m, with an adaptive height tolerance (15 m for buildings taller than 100 m, 0.75 m otherwise) and 4-connectivity.
    - Keep only footprints ≥ 45 pixels (~100 m²).
-   - Polygonise the labelled raster *(C++, `--buildings_output`)*; with `--grow_output` the resulting footprints are loaded into the model automatically in the same run. Simplification with Visvalingam–Whyatt (tolerance 3 m) is still manual in QGIS.
+   - Polygonise the labelled raster *(C++, `--buildings_output`)*; with `--grow_output` the resulting footprints are loaded into the model automatically in the same run. Footprints are then simplified in-tool with Visvalingam–Whyatt (`--simplify_tolerance`, default 3 m ≈ 2 pixels).
 5. **Preprocessing** *(C++)* — all polygons are repaired and triangulated (constrained Delaunay triangulation + odd-even interior/exterior labelling, per Ledoux et al. 2014). A simplified DTM is built as a TIN from points every 30 m, each set to the median of DTM points within a 120 m radius.
 6. **Polygon lifting** *(C++)* — three lifting rules:
    - *Flat:* each building footprint is raised to the 90th percentile of the DSM heights inside it.
@@ -151,6 +151,7 @@ The two raster paths (`--dsm`, `--dtm`) and the three output paths are required;
 | `--grow_output` | Write the region-growing building labels (uint32 raster) |
 | `--buildings_output` | Write the polygonised building footprints (`.gpkg`) and load them into the model in the same run (when set together with `--grow_output`) |
 | `--seed_threshold`, `--tall_building_height`, `--tall_tolerance`, `--normal_tolerance`, `--minimum_region_area` | Region-growing parameters |
+| `--simplify_tolerance` | Building footprint simplification tolerance (Visvalingam–Whyatt, metres; 0 disables) |
 | `--dtm_cell_size`, `--dtm_search_radius`, `--dtm_ratio_to_use` | Simplified DTM TIN parameters |
 | `--building_height_percentile` | Building height percentile (flat lifting) |
 | `--bucket_size`, `--maximum_depth` | Quadtree tuning |
@@ -173,6 +174,7 @@ Build in Xcode, then run. Outputs are written to:
 | `tall_building_height = 100.0` | config / CLI | Height above which the tall tolerance applies |
 | `tall_tolerance = 15.0` / `normal_tolerance = 0.75` | config / CLI | Region-growing height difference (tall vs. normal buildings) |
 | `minimum_region_area = 45` | config / CLI | Minimum footprint size in pixels |
+| `simplify_tolerance = 3.0` | config / CLI | Visvalingam–Whyatt footprint simplification tolerance (metres) |
 | `dtm_cell_size = 30.0` | config / CLI | Grid spacing of the simplified DTM TIN |
 | `dtm_search_radius = 120.0` | config / CLI | Radius around each TIN point |
 | `dtm_ratio_to_use = 0.5` | config / CLI | Quantile of DTM points used as each TIN point's elevation (0.5 = median) |
@@ -200,7 +202,7 @@ The following steps are still performed manually in QGIS and are intended to be 
 - [x] Include land-use and water features in the road-polygon union
 - [ ] Classify road polygons by proximity to `vialidad_l`/`via_ferrea_l` line features
 - [x] Raster→polygon conversion (`--buildings_output`)
-- [ ] Visvalingam–Whyatt simplification of building footprints
+- [x] Visvalingam–Whyatt simplification of building footprints (`--simplify_tolerance`)
 
 ## Citing
 
