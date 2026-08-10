@@ -60,7 +60,7 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
    - Subtract the DTM from the DSM to get object heights, and mask areas where buildings should not exist (roads, railways, water streams, green areas, water bodies) to NODATA *(C++, `--mask_output`, using the available Road/WaterBody/PlantCover layers)*.
    - Region growing *(C++, `--grow_output`)* from seed points ≥ 10 m, with an adaptive height tolerance (15 m for buildings taller than 100 m, 0.75 m otherwise) and 4-connectivity.
    - Keep only footprints ≥ 45 pixels (~100 m²).
-   - Polygonise the labelled raster *(C++, `--buildings_output`)*; simplification with Visvalingam–Whyatt (tolerance 3 m) is still manual in QGIS.
+   - Polygonise the labelled raster *(C++, `--buildings_output`)*; with `--grow_output` the resulting footprints are loaded into the model automatically in the same run. Simplification with Visvalingam–Whyatt (tolerance 3 m) is still manual in QGIS.
 5. **Preprocessing** *(C++)* — all polygons are repaired and triangulated (constrained Delaunay triangulation + odd-even interior/exterior labelling, per Ledoux et al. 2014). A simplified DTM is built as a TIN from points every 30 m, each set to the median of DTM points within a 120 m radius.
 6. **Polygon lifting** *(C++)* — three lifting rules:
    - *Flat:* each building footprint is raised to the 90th percentile of the DSM heights inside it.
@@ -119,7 +119,6 @@ Alternatively, pass everything on the command line. Command-line options overrid
 elevadormx \
   --dsm      .../e14a39b3_ms.bil \
   --dtm      .../e14a39b3_mt.bil \
-  --building .../footprints.gpkg \
   --waterbody .../water\ bodies.gpkg \
   --plantcover .../plant\ cover.gpkg \
   --terrain  .../terrain.gpkg \
@@ -131,16 +130,19 @@ elevadormx \
   --terrain_obj  .../terrain.obj \
   --mask_output  .../buildings_masked.tif \
   --grow_output  .../building_labels.tif \
+  --buildings_output .../building_footprints.gpkg \
   --obj      .../cdmx.obj \
   --cityjson .../cdmx.city.json
 ```
+
+Setting both `--grow_output` and `--buildings_output` generates the building footprints and loads them into the model in the same run; `--building` is only needed when footprints are prepared separately (e.g. to reuse a previously generated `.gpkg`).
 
 The two raster paths (`--dsm`, `--dtm`) and the three output paths are required; the vector layers are optional and skipped with a warning if omitted. The full set of recognised options mirrors the keys in `config.example.json`:
 
 | Option | Meaning |
 |---|---|
 | `--dsm`, `--dtm` | DSM / DTM raster paths (required) |
-| `--building`, `--waterbody`, `--plantcover`, `--road`, `--terrain` | Vector layer paths |
+| `--building`, `--waterbody`, `--plantcover`, `--road`, `--terrain` | Vector layer paths (`--building` is only used when footprints are not generated in-tool) |
 | `--generate_roads` | Generate road polygons from city blocks instead of reading `--road` |
 | `--city_blocks` | INEGI `manzana_a` layer (city blocks) used for road generation |
 | `--land_use` | Comma-separated land-use polygon layers to exclude from roads (e.g. `granja_a`, `ins_deportiv_a`) |
@@ -150,7 +152,7 @@ The two raster paths (`--dsm`, `--dtm`) and the three output paths are required;
 | `--mask_output` | Write the object-height raster (DSM−DTM) with roads/water/green masked to NODATA |
 | `--building_mask` | Masked object-height raster to grow buildings from (defaults to `--mask_output` output) |
 | `--grow_output` | Write the region-growing building labels (uint32 raster) |
-| `--buildings_output` | Write the polygonised building footprints (`.gpkg`) |
+| `--buildings_output` | Write the polygonised building footprints (`.gpkg`) and load them into the model in the same run (when set together with `--grow_output`) |
 | `--seed_threshold`, `--tall_building_height`, `--tall_tolerance`, `--normal_tolerance`, `--minimum_region_area` | Region-growing parameters |
 | `--dtm_cell_size`, `--dtm_search_radius`, `--dtm_ratio_to_use` | Simplified DTM TIN parameters |
 | `--building_height_percentile` | Building height percentile (flat lifting) |
@@ -162,6 +164,7 @@ Build in Xcode, then run. Outputs are written to:
 - `terrain.obj` — simplified DTM TIN (debug/parameter tuning)
 - `buildings_masked.tif` — object heights (DSM−DTM) with roads/water/green masked to NODATA
 - `building_labels.tif` — region-growing output (uint32 building id per pixel)
+- `building_footprints.gpkg` — polygonised building footprints (loaded into the model automatically)
 - `cdmx.obj` — full 3D model for visualisation
 - `cdmx.city.json` — CityJSON model with semantics
 

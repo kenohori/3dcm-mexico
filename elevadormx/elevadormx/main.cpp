@@ -511,6 +511,49 @@ void lift_flat_polygons(const char *cityjson_class, Map &map, Point_cloud &point
   }
 }
 
+// Interpolate the DTM TIN elevation at a 2D point, falling back to the closest point on the TIN's convex hull when the point is outside it
+Kernel::FT interpolate_dtm_height(const Triangulation &terrain, const Kernel::Point_2 &point) {
+  if (terrain.number_of_vertices() == 0) return 0.0;
+  Triangulation::Face_handle face_of_point = terrain.locate(point);
+  Kernel::Point_2 query_point = point;
+  if (terrain.is_infinite(face_of_point)) {
+    
+    // Get the finite hull edge of this infinite face
+    Kernel::Point_2 a, b;
+    Kernel::FT za, zb;
+    bool first_finite_vertex = true;
+    for (int i = 0; i < 3; ++i) {
+      if (terrain.is_infinite(face_of_point->vertex(i))) continue;
+      if (first_finite_vertex) {
+        a = face_of_point->vertex(i)->point();
+        za = face_of_point->vertex(i)->info().z;
+        first_finite_vertex = false;
+      } else {
+        b = face_of_point->vertex(i)->point();
+        zb = face_of_point->vertex(i)->info().z;
+      }
+    }
+    
+    // Project the query point onto the hull edge
+    Kernel::Vector_2 ab = b - a;
+    const Kernel::FT length_sq = ab.squared_length();
+    Kernel::FT t = (length_sq == 0.0) ? 0.0 : CGAL::scalar_product(point - a, ab)/length_sq;
+    t = std::max(Kernel::FT(0.0), std::min(Kernel::FT(1.0), t));
+    query_point = a + t*ab;
+    face_of_point = terrain.locate(query_point);
+    if (terrain.is_infinite(face_of_point)) return za + t*(zb-za);
+  }
+  std::vector<Kernel::FT> barycentric_coordinates;
+  CGAL::Barycentric_coordinates::triangle_coordinates_2(face_of_point->vertex(0)->point(),
+                                                        face_of_point->vertex(1)->point(),
+                                                        face_of_point->vertex(2)->point(),
+                                                        query_point,
+                                                        std::back_inserter(barycentric_coordinates));
+  return barycentric_coordinates[0]*face_of_point->vertex(0)->info().z +
+         barycentric_coordinates[1]*face_of_point->vertex(1)->info().z +
+         barycentric_coordinates[2]*face_of_point->vertex(2)->info().z;
+}
+
 void lift_polygon_vertices(const char *cityjson_class, Map &map, Point_cloud &point_cloud, Point_index &point_cloud_index, Triangulation &terrain) {
   clock_t start_time = clock();
   std::size_t n_vertices = 0, n_polygons = 0;
@@ -520,16 +563,7 @@ void lift_polygon_vertices(const char *cityjson_class, Map &map, Point_cloud &po
            current_vertex != polygon.triangulation.finite_vertices_end();
            ++current_vertex) {
         
-        Triangulation::Face_handle face_of_point = terrain.locate(current_vertex->point());
-        std::vector<Kernel::FT> barycentric_coordinates;
-        CGAL::Barycentric_coordinates::triangle_coordinates_2(face_of_point->vertex(0)->point(),
-                                                              face_of_point->vertex(1)->point(),
-                                                              face_of_point->vertex(2)->point(),
-                                                              current_vertex->point(),
-                                                              std::back_inserter(barycentric_coordinates));
-        current_vertex->info().z = barycentric_coordinates[0]*face_of_point->vertex(0)->info().z +
-                                   barycentric_coordinates[1]*face_of_point->vertex(1)->info().z +
-                                   barycentric_coordinates[2]*face_of_point->vertex(2)->info().z;
+        current_vertex->info().z = interpolate_dtm_height(terrain, current_vertex->point());
         
         ++n_vertices;
       } ++n_polygons;
@@ -547,17 +581,7 @@ void lift_polygons(const char *cityjson_class, Map &map, Point_cloud &point_clou
            current_vertex != polygon.triangulation.finite_vertices_end();
            ++current_vertex) {
         
-        
-        Triangulation::Face_handle face_of_point = terrain.locate(current_vertex->point());
-        std::vector<Kernel::FT> barycentric_coordinates;
-        CGAL::Barycentric_coordinates::triangle_coordinates_2(face_of_point->vertex(0)->point(),
-                                                              face_of_point->vertex(1)->point(),
-                                                              face_of_point->vertex(2)->point(),
-                                                              current_vertex->point(),
-                                                              std::back_inserter(barycentric_coordinates));
-        current_vertex->info().z = barycentric_coordinates[0]*face_of_point->vertex(0)->info().z +
-                                   barycentric_coordinates[1]*face_of_point->vertex(1)->info().z +
-                                   barycentric_coordinates[2]*face_of_point->vertex(2)->info().z;
+        current_vertex->info().z = interpolate_dtm_height(terrain, current_vertex->point());
       }
       
       // Add terrain vertices in polygon
@@ -603,28 +627,10 @@ void create_vertical_walls(Map &map, Triangulation &dtm) {
             // Get elevations at origin and destination
             std::set<Kernel::FT> origin_elevations, destination_elevations;
             origin_elevations.insert(origin->info().z);
-            Triangulation::Face_handle face_of_point = dtm.locate(origin->point());
-            std::vector<Kernel::FT> barycentric_coordinates;
-            CGAL::Barycentric_coordinates::triangle_coordinates_2(face_of_point->vertex(0)->point(),
-                                                                  face_of_point->vertex(1)->point(),
-                                                                  face_of_point->vertex(2)->point(),
-                                                                  origin->point(),
-                                                                  std::back_inserter(barycentric_coordinates));
-            Kernel::FT z = barycentric_coordinates[0]*face_of_point->vertex(0)->info().z +
-                           barycentric_coordinates[1]*face_of_point->vertex(1)->info().z +
-                           barycentric_coordinates[2]*face_of_point->vertex(2)->info().z;
+            Kernel::FT z = interpolate_dtm_height(dtm, origin->point());
             origin_elevations.insert(z);
             destination_elevations.insert(destination->info().z);
-            face_of_point = dtm.locate(destination->point());
-            barycentric_coordinates.clear();
-            CGAL::Barycentric_coordinates::triangle_coordinates_2(face_of_point->vertex(0)->point(),
-                                                                  face_of_point->vertex(1)->point(),
-                                                                  face_of_point->vertex(2)->point(),
-                                                                  destination->point(),
-                                                                  std::back_inserter(barycentric_coordinates));
-            z = barycentric_coordinates[0]*face_of_point->vertex(0)->info().z +
-                barycentric_coordinates[1]*face_of_point->vertex(1)->info().z +
-                barycentric_coordinates[2]*face_of_point->vertex(2)->info().z;
+            z = interpolate_dtm_height(dtm, destination->point());
             destination_elevations.insert(z);
             
             // Vertical wall is not needed
@@ -798,6 +804,72 @@ void read_polygon_features(GDALDataset *dataset, const Config &config, OGRMultiP
       }
     }
   }
+}
+
+// Read all polygon features from a dataset into the map with the given semantic class
+std::size_t read_polygon_layer(GDALDataset *dataset, const std::string &semantic_class, Map &map) {
+  std::size_t n_polygons = 0;
+  for (auto &&input_layer: dataset->GetLayers()) {
+    input_layer->ResetReading();
+    
+    // Try to extract CRS from this layer
+    const OGRSpatialReference *spatial_reference = input_layer->GetSpatialRef();
+    if (spatial_reference != NULL) {
+      char *srs = (char *)CPLMalloc(10000*sizeof(char));
+      spatial_reference->exportToPrettyWkt(&srs);
+      CPLFree(srs);
+      const char *authority = spatial_reference->GetAuthorityName(NULL);
+      if (authority != NULL) map.crs_authority = std::string(authority);
+      const char *code = spatial_reference->GetAuthorityCode(NULL);
+      if (code != NULL) map.crs_code = std::string(code);
+    }
+    
+    OGRFeature *input_feature;
+    while ((input_feature = input_layer->GetNextFeature()) != NULL) {
+      if (!input_feature->GetGeometryRef()) continue;
+      
+      if (wkbFlatten(input_feature->GetGeometryRef()->getGeometryType()) == wkbPolygon ||
+          wkbFlatten(input_feature->GetGeometryRef()->getGeometryType()) == wkbTriangle) {
+        OGRPolygon *input_polygon = input_feature->GetGeometryRef()->toPolygon();
+        map.polygons.emplace_back();
+        map.polygons.back().id = semantic_class + "-" + std::to_string(input_feature->GetFID());
+        map.polygons.back().semantic_class = semantic_class;
+        for (int current_vertex = 0; current_vertex < input_polygon->getExteriorRing()->getNumPoints(); ++current_vertex) {
+          map.polygons.back().outer_ring.points.emplace_back(input_polygon->getExteriorRing()->getX(current_vertex),
+                                                             input_polygon->getExteriorRing()->getY(current_vertex));
+        } for (int current_inner_ring = 0; current_inner_ring < input_polygon->getNumInteriorRings(); ++current_inner_ring) {
+          map.polygons.back().inner_rings.emplace_back();
+          for (int current_vertex = 0; current_vertex < input_polygon->getInteriorRing(current_inner_ring)->getNumPoints(); ++current_vertex) {
+            map.polygons.back().inner_rings.back().points.emplace_back(input_polygon->getInteriorRing(current_inner_ring)->getX(current_vertex),
+                                                                       input_polygon->getInteriorRing(current_inner_ring)->getY(current_vertex));
+          }
+        }
+        ++n_polygons;
+      } else if (wkbFlatten(input_feature->GetGeometryRef()->getGeometryType()) == wkbMultiPolygon) {
+        OGRMultiPolygon *input_multipolygon = input_feature->GetGeometryRef()->toMultiPolygon();
+        for (int current_polygon = 0; current_polygon < input_multipolygon->getNumGeometries(); ++current_polygon) {
+          OGRPolygon *input_polygon = input_multipolygon->getGeometryRef(current_polygon);
+          map.polygons.emplace_back();
+          map.polygons.back().id = semantic_class + "-" + std::to_string(input_feature->GetFID()) + "-" + std::to_string(current_polygon);
+          map.polygons.back().semantic_class = semantic_class;
+          for (int current_vertex = 0; current_vertex < input_polygon->getExteriorRing()->getNumPoints(); ++current_vertex) {
+            map.polygons.back().outer_ring.points.emplace_back(input_polygon->getExteriorRing()->getX(current_vertex),
+                                                               input_polygon->getExteriorRing()->getY(current_vertex));
+          } for (int current_inner_ring = 0; current_inner_ring < input_polygon->getNumInteriorRings(); ++current_inner_ring) {
+            map.polygons.back().inner_rings.emplace_back();
+            for (int current_vertex = 0; current_vertex < input_polygon->getInteriorRing(current_inner_ring)->getNumPoints(); ++current_vertex) {
+              map.polygons.back().inner_rings.back().points.emplace_back(input_polygon->getInteriorRing(current_inner_ring)->getX(current_vertex),
+                                                                         input_polygon->getInteriorRing(current_inner_ring)->getY(current_vertex));
+            }
+          }
+          ++n_polygons;
+        }
+      } else {
+        std::cout << "Unknown type..." << std::endl;
+      }
+    }
+  }
+  return n_polygons;
 }
 
 // Split a comma-separated list of paths
@@ -1346,11 +1418,18 @@ int main(int argc, const char * argv[]) {
   std::map<std::string, std::string> vector_paths, raster_paths;
   raster_paths["dsm"] = config.dsm_path;
   raster_paths["dtm"] = config.dtm_path;
-  vector_paths["Building"] = config.building_path;
   vector_paths["WaterBody"] = config.waterbody_path;
   vector_paths["PlantCover"] = config.plantcover_path;
   if (!config.generate_roads) vector_paths["Road"] = config.road_path;
   vector_paths["Terrain"] = config.terrain_path;
+  
+  // When building footprints are grown in-tool, the generated footprints replace the --building input
+  const bool generate_buildings_in_tool = !config.grow_output_path.empty() && !config.buildings_output_path.empty();
+  if (!generate_buildings_in_tool) {
+    vector_paths["Building"] = config.building_path;
+  } else if (!config.building_path.empty()) {
+    std::cout << "Building footprints will be generated in-tool; ignoring --building (" << config.building_path << ")" << std::endl;
+  }
   
   Map map;
   Point_cloud dsm, dtm_points;
@@ -1411,8 +1490,8 @@ int main(int argc, const char * argv[]) {
         int index = row * width + col;
         float value = rasterData[index];
         
-        // Skip no data values
-        if (hasNoData && value == noDataValue) continue;
+        // Skip no data values (using the same tolerant check as the building mask)
+        if (is_nodata_value(value, hasNoData, noDataValue)) continue;
         if (std::isnan(value)) continue;
         
         // Calculate coordinates
@@ -1480,73 +1559,8 @@ int main(int argc, const char * argv[]) {
       std::cerr << "Error: Could not open " << path.first << " dataset: " << path.second << std::endl;
       continue;
     } std::cout << "Opening " << path.first << " type: " << dataset->GetDriverName() << std::endl;
-    
-    // Load polygons
-    for (auto &&input_layer: dataset->GetLayers()) {
-      input_layer->ResetReading();
-      
-      // Try to extract CRS from this layer
-      const OGRSpatialReference *spatial_reference = input_layer->GetSpatialRef();
-      if (spatial_reference != NULL) {
-        char *srs = (char *)CPLMalloc(10000*sizeof(char));
-        spatial_reference->exportToPrettyWkt(&srs);
-        //      std::cout << srs << std::endl;
-        CPLFree(srs);
-        const char *authority = spatial_reference->GetAuthorityName(NULL);
-        if (authority != NULL) map.crs_authority = std::string(authority);
-        const char *code = spatial_reference->GetAuthorityCode(NULL);
-        if (code != NULL) map.crs_code = std::string(code);
-        //            std::cout << "Authority: " << authority << " code: " << code << std::endl;
-      }
-      
-      OGRFeature *input_feature;
-      while ((input_feature = input_layer->GetNextFeature()) != NULL) {
-        if (!input_feature->GetGeometryRef()) continue;
-        
-        if (wkbFlatten(input_feature->GetGeometryRef()->getGeometryType()) == wkbPolygon ||
-            wkbFlatten(input_feature->GetGeometryRef()->getGeometryType()) == wkbTriangle) {
-          OGRPolygon *input_polygon = input_feature->GetGeometryRef()->toPolygon();
-          map.polygons.emplace_back();
-          map.polygons.back().id = path.first + "-" + std::to_string(input_feature->GetFID());
-          map.polygons.back().semantic_class = path.first;
-          for (int current_vertex = 0; current_vertex < input_polygon->getExteriorRing()->getNumPoints(); ++current_vertex) {
-            map.polygons.back().outer_ring.points.emplace_back(input_polygon->getExteriorRing()->getX(current_vertex),
-                                                               input_polygon->getExteriorRing()->getY(current_vertex));
-          } for (int current_inner_ring = 0; current_inner_ring < input_polygon->getNumInteriorRings(); ++current_inner_ring) {
-            map.polygons.back().inner_rings.emplace_back();
-            for (int current_vertex = 0; current_vertex < input_polygon->getInteriorRing(current_inner_ring)->getNumPoints(); ++current_vertex) {
-              map.polygons.back().inner_rings.back().points.emplace_back(input_polygon->getInteriorRing(current_inner_ring)->getX(current_vertex),
-                                                                         input_polygon->getInteriorRing(current_inner_ring)->getY(current_vertex));
-            }
-          }
-        }
-        
-        else if (wkbFlatten(input_feature->GetGeometryRef()->getGeometryType()) == wkbMultiPolygon) {
-          OGRMultiPolygon *input_multipolygon = input_feature->GetGeometryRef()->toMultiPolygon();
-          for (int current_polygon = 0; current_polygon < input_multipolygon->getNumGeometries(); ++current_polygon) {
-            OGRPolygon *input_polygon = input_multipolygon->getGeometryRef(current_polygon);
-            map.polygons.emplace_back();
-            map.polygons.back().id = path.first + "-" + std::to_string(input_feature->GetFID()) + "-" + std::to_string(current_polygon);
-            map.polygons.back().semantic_class = path.first;
-            for (int current_vertex = 0; current_vertex < input_polygon->getExteriorRing()->getNumPoints(); ++current_vertex) {
-              map.polygons.back().outer_ring.points.emplace_back(input_polygon->getExteriorRing()->getX(current_vertex),
-                                                                 input_polygon->getExteriorRing()->getY(current_vertex));
-            } for (int current_inner_ring = 0; current_inner_ring < input_polygon->getNumInteriorRings(); ++current_inner_ring) {
-              map.polygons.back().inner_rings.emplace_back();
-              for (int current_vertex = 0; current_vertex < input_polygon->getInteriorRing(current_inner_ring)->getNumPoints(); ++current_vertex) {
-                map.polygons.back().inner_rings.back().points.emplace_back(input_polygon->getInteriorRing(current_inner_ring)->getX(current_vertex),
-                                                                           input_polygon->getInteriorRing(current_inner_ring)->getY(current_vertex));
-              }
-            }
-          }
-        }
-        
-        else {
-          std::cout << "Unknown type..." << std::endl;
-        }
-      }
-    }
-    
+    std::size_t n_polygons = read_polygon_layer(dataset, path.first, map);
+    std::cout << "Loaded " << n_polygons << " " << path.first << " polygons." << std::endl;
     GDALClose(dataset);
   }
 
@@ -1555,6 +1569,18 @@ int main(int argc, const char * argv[]) {
 
   // Extract building footprints by region growing on the masked heights
   if (!config.grow_output_path.empty()) grow_building_footprints(config);
+
+  // Load the generated building footprints into the model (single-invocation pipeline)
+  if (generate_buildings_in_tool) {
+    GDALDataset *dataset = (GDALDataset*) GDALOpenEx(config.buildings_output_path.c_str(), GDAL_OF_READONLY, NULL, NULL, NULL);
+    if (dataset == NULL) {
+      std::cerr << "Error: Could not open generated building footprints: " << config.buildings_output_path << std::endl;
+    } else {
+      std::size_t n_generated_buildings = read_polygon_layer(dataset, "Building", map);
+      std::cout << "Loaded " << n_generated_buildings << " generated building footprints into the model." << std::endl;
+      GDALClose(dataset);
+    }
+  }
 
   // Basic polygon repair (pre-requisite for triangulation)
   std::vector<Polygon>::iterator current_polygon = map.polygons.begin();
