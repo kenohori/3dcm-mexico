@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <list>
 
 #include <ogrsf_frmts.h>
 #include <gdal_priv.h>
@@ -53,9 +54,13 @@ struct Vertex_info {
 struct Face_info {
   bool processed;
   bool interior;
+  bool grouped;
+  int road_segment;
   Face_info() {
     processed = false;
     interior = false;
+    grouped = false;
+    road_segment = -1;
   }
 };
 
@@ -939,13 +944,122 @@ void read_line_features(const char *path, const Config &config, Line_class &line
   } GDALClose(dataset);
 }
 
-// Classify generated gap polygons (roads) by proximity to INEGI line layers:
+// Insert the ring constraints of a polygon into its triangulation and label the interior faces
+void triangulate_polygon(Polygon &polygon) {
+  std::vector<Kernel::Point_2>::const_iterator current_point = polygon.outer_ring.points.begin();
+  Triangulation::Vertex_handle current_vertex = polygon.triangulation.insert(*current_point);
+  ++current_point;
+  Triangulation::Vertex_handle previous_vertex;
+  while (current_point != polygon.outer_ring.points.end()) {
+    previous_vertex = current_vertex;
+    current_vertex = polygon.triangulation.insert(*current_point);
+    if (previous_vertex != current_vertex) polygon.triangulation.odd_even_insert_constraint(previous_vertex, current_vertex);
+    ++current_point;
+  } for (auto const &ring: polygon.inner_rings) {
+    current_point = ring.points.begin();
+    current_vertex = polygon.triangulation.insert(*current_point);
+    while (current_point != ring.points.end()) {
+      previous_vertex = current_vertex;
+      current_vertex = polygon.triangulation.insert(*current_point);
+      if (previous_vertex != current_vertex) polygon.triangulation.odd_even_insert_constraint(previous_vertex, current_vertex);
+      ++current_point;
+    }
+  } if (polygon.triangulation.number_of_faces() > 0) label_polygon(polygon);
+}
+
+// A single noded piece of a road/railway/stream line, inheriting the class and attributes of its source feature
+struct Road_segment {
+  double x1, y1, x2, y2;
+  double min_x, min_y, max_x, max_y;
+  std::string semantic_class;
+  std::map<std::string, std::string> attributes;
+  Road_segment(double x1, double y1, double x2, double y2, const std::string &semantic_class,
+               const std::map<std::string, std::string> &attributes) :
+      x1(x1), y1(y1), x2(x2), y2(y2), semantic_class(semantic_class), attributes(attributes) {
+    min_x = std::min(x1, x2);
+    max_x = std::max(x1, x2);
+    min_y = std::min(y1, y2);
+    max_y = std::max(y1, y2);
+  }
+};
+
+// Uniform grid over the study area indexing road segments by the cells their bounding box overlaps
+struct Segment_grid {
+  double cell_size, min_x, min_y, max_x, max_y;
+  std::size_t nx, ny;
+  std::vector<std::vector<std::size_t>> cells;
+  
+  void build(const std::vector<Road_segment> &segments, const Config &config) {
+    cell_size = std::max(config.line_classification_distance, 1.0);
+    min_x = config.study_x_min;
+    min_y = config.study_y_min;
+    max_x = config.study_x_max;
+    max_y = config.study_y_max;
+    nx = std::max<std::size_t>(1, std::ceil((max_x-min_x)/cell_size));
+    ny = std::max<std::size_t>(1, std::ceil((max_y-min_y)/cell_size));
+    cells.assign(nx*ny, {});
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+      std::size_t cx1 = cell_index_x(segments[i].min_x);
+      std::size_t cx2 = cell_index_x(segments[i].max_x);
+      std::size_t cy1 = cell_index_y(segments[i].min_y);
+      std::size_t cy2 = cell_index_y(segments[i].max_y);
+      for (std::size_t cx = cx1; cx <= cx2; ++cx) {
+        for (std::size_t cy = cy1; cy <= cy2; ++cy) cells[cy*nx+cx].push_back(i);
+      }
+    }
+  }
+  
+  // Collect the indices of all segments whose bounding box is within `margin` of the given point
+  void query(double x, double y, double margin, std::vector<std::size_t> &result) const {
+    const double expanded = margin+cell_size;
+    long cx1 = (long)std::floor((x-expanded-min_x)/cell_size);
+    long cx2 = (long)std::floor((x+expanded-min_x)/cell_size);
+    long cy1 = (long)std::floor((y-expanded-min_y)/cell_size);
+    long cy2 = (long)std::floor((y+expanded-min_y)/cell_size);
+    if (cx1 < 0) cx1 = 0;
+    if (cx2 > (long)(nx-1)) cx2 = (long)(nx-1);
+    if (cy1 < 0) cy1 = 0;
+    if (cy2 > (long)(ny-1)) cy2 = (long)(ny-1);
+    for (long cx = cx1; cx <= cx2; ++cx) {
+      for (long cy = cy1; cy <= cy2; ++cy) {
+        for (auto const &segment: cells[(std::size_t)cy*nx+(std::size_t)cx]) result.push_back(segment);
+      }
+    }
+  }
+  
+private:
+  std::size_t cell_index_x(double x) const {
+    long index = (long)std::floor((x-min_x)/cell_size);
+    if (index < 0) index = 0;
+    if (index > (long)(nx-1)) index = (long)(nx-1);
+    return (std::size_t)index;
+  }
+  std::size_t cell_index_y(double y) const {
+    long index = (long)std::floor((y-min_y)/cell_size);
+    if (index < 0) index = 0;
+    if (index > (long)(ny-1)) index = (long)(ny-1);
+    return (std::size_t)index;
+  }
+};
+
+double point_segment_distance(double px, double py, const Road_segment &segment) {
+  const double dx = segment.x2-segment.x1, dy = segment.y2-segment.y1;
+  const double length_squared = dx*dx+dy*dy;
+  if (length_squared == 0.0) return std::hypot(px-segment.x1, py-segment.y1);
+  const double t = std::max(0.0, std::min(1.0, ((px-segment.x1)*dx+(py-segment.y1)*dy)/length_squared));
+  return std::hypot(px-(segment.x1+t*dx), py-(segment.y1+t*dy));
+}
+
+// Split the generated road polygons by proximity to noded INEGI line segments:
 // vialidad_l -> Road, via_ferrea_l -> Railway, corriente_ag_l -> WaterBody.
-// Each gap is assigned the class of its nearest line (within line_classification_distance);
-// on ties, Road wins (checked first). Gaps with no line nearby keep the Road default.
-// The attributes of the nearest matching line are attached to the polygon for CityJSON output.
-void classify_road_polygons(const Config &config, std::vector<OGRPolygon*> &road_polygons,
+// Each triangle of the road triangulation is assigned the class of its nearest segment
+// (within line_classification_distance); on ties, Road wins (checked first). Triangles
+// with no segment nearby keep the Road default. Adjacent triangles sharing a segment are
+// then merged into polygons carrying that segment's class and attributes.
+bool classify_road_polygons(const Config &config, std::vector<OGRPolygon*> &road_polygons,
                             std::vector<std::string> &road_classes, std::vector<std::map<std::string, std::string>> &road_attributes) {
+  // Returns true when road_polygons has been replaced by owned per-segment polygons
+  // (which the caller must destroy), false when it is left as-is pointing into roads_geom.
   // Priority order Road > Railway > WaterBody decides ties (strictly-smaller replaces)
   std::vector<Line_class> line_classes;
   if (!config.road_lines_path.empty()) {
@@ -966,42 +1080,199 @@ void classify_road_polygons(const Config &config, std::vector<OGRPolygon*> &road
   }
   if (line_classes.empty()) {
     std::cout << "No line layers for road classification; keeping all generated polygons as Road." << std::endl;
-    return;
+    return false;
   }
   
   const double classification_distance = config.line_classification_distance;
-  std::size_t n_road = 0, n_railway = 0, n_waterbody = 0;
-  for (std::size_t i = 0; i < road_polygons.size(); ++i) {
-    OGREnvelope envelope;
-    road_polygons[i]->getEnvelope(&envelope);
-    const double x_min = envelope.MinX-classification_distance, x_max = envelope.MaxX+classification_distance;
-    const double y_min = envelope.MinY-classification_distance, y_max = envelope.MaxY+classification_distance;
+  
+  // Node all line features (road, railway, stream) into segments at their mutual intersections
+  OGRMultiLineString all_lines;
+  for (auto const &line_class: line_classes) {
+    for (auto *geometry: line_class.geometries) {
+      if (wkbFlatten(geometry->getGeometryType()) == wkbLineString) {
+        all_lines.addGeometry(geometry);
+      } else if (wkbFlatten(geometry->getGeometryType()) == wkbMultiLineString) {
+        OGRMultiLineString *multiline = geometry->toMultiLineString();
+        for (int i = 0; i < multiline->getNumGeometries(); ++i) all_lines.addGeometry(multiline->getGeometryRef(i));
+      }
+    }
+  }
+  if (all_lines.getNumGeometries() == 0) {
+    std::cout << "No lines found in the study area; keeping all generated polygons as Road." << std::endl;
+    return false;
+  }
+  OGRGeometry *noded_lines = all_lines.UnaryUnion();
+  if (noded_lines == NULL || noded_lines->IsEmpty()) {
+    std::cerr << "Error: Line noding failed." << std::endl;
+    return false;
+  }
+  
+  // Re-associate each noded piece with its source feature to recover its class and attributes
+  std::vector<Road_segment> segments;
+  auto add_noded_piece = [&](const OGRLineString *piece) {
+    const int n_points = piece->getNumPoints();
+    if (n_points < 2) return;
+    const double mx = (piece->getX(0)+piece->getX(1))/2.0, my = (piece->getY(0)+piece->getY(1))/2.0;
+    OGRPoint midpoint(mx, my);
+    std::size_t best_class_index = 0, best_feature_index = 0;
     double best_distance = std::numeric_limits<double>::max();
-    std::string best_class;
-    std::map<std::string, std::string> best_attributes;
-    for (auto const &line_class: line_classes) {
-      double min_distance = std::numeric_limits<double>::max();
-      std::size_t nearest_index = 0;
-      for (std::size_t j = 0; j < line_class.geometries.size(); ++j) {
-        OGREnvelope line_envelope;
-        line_class.geometries[j]->getEnvelope(&line_envelope);
-        if (line_envelope.MaxX < x_min || line_envelope.MinX > x_max || line_envelope.MaxY < y_min || line_envelope.MinY > y_max) continue;
-        double distance = road_polygons[i]->Distance(line_class.geometries[j]);
-        if (distance >= 0 && distance < min_distance) {
-          min_distance = distance;
-          nearest_index = j;
+    for (std::size_t c = 0; c < line_classes.size(); ++c) {
+      for (std::size_t f = 0; f < line_classes[c].geometries.size(); ++f) {
+        OGREnvelope envelope;
+        line_classes[c].geometries[f]->getEnvelope(&envelope);
+        if (mx < envelope.MinX-1e-3 || mx > envelope.MaxX+1e-3 || my < envelope.MinY-1e-3 || my > envelope.MaxY+1e-3) continue;
+        const double distance = midpoint.Distance(line_classes[c].geometries[f]);
+        if (distance < best_distance) {
+          best_distance = distance;
+          best_class_index = c;
+          best_feature_index = f;
         }
       }
-      if (min_distance < best_distance) {
-        best_distance = min_distance;
-        best_class = line_class.semantic_class;
-        best_attributes = line_class.attributes[nearest_index];
+    } if (best_distance == std::numeric_limits<double>::max()) return;
+    for (int v = 0; v < n_points-1; ++v) {
+      segments.emplace_back(piece->getX(v), piece->getY(v), piece->getX(v+1), piece->getY(v+1),
+                            line_classes[best_class_index].semantic_class,
+                            line_classes[best_class_index].attributes[best_feature_index]);
+    }
+  };
+  if (wkbFlatten(noded_lines->getGeometryType()) == wkbLineString) {
+    add_noded_piece(noded_lines->toLineString());
+  } else if (wkbFlatten(noded_lines->getGeometryType()) == wkbMultiLineString) {
+    OGRMultiLineString *multiline = noded_lines->toMultiLineString();
+    for (int i = 0; i < multiline->getNumGeometries(); ++i) add_noded_piece(multiline->getGeometryRef(i)->toLineString());
+  }
+  OGRGeometryFactory::destroyGeometry(noded_lines);
+  if (segments.empty()) {
+    std::cout << "No noded line segments; keeping all generated polygons as Road." << std::endl;
+    return false;
+  }
+  std::cout << "Noded line segments: " << segments.size() << std::endl;
+  
+  // Index the segments in a grid for nearest-segment queries
+  Segment_grid grid;
+  grid.build(segments, config);
+  
+  // Split each road polygon into per-segment polygons
+  std::vector<OGRPolygon*> split_polygons;
+  std::vector<std::string> split_classes;
+  std::vector<std::map<std::string, std::string>> split_attributes;
+  for (std::size_t i = 0; i < road_polygons.size(); ++i) {
+    Polygon polygon;
+    OGRLinearRing *outer_ring = road_polygons[i]->getExteriorRing();
+    for (int v = 0; v < outer_ring->getNumPoints(); ++v) {
+      polygon.outer_ring.points.emplace_back(outer_ring->getX(v), outer_ring->getY(v));
+    } for (int r = 0; r < road_polygons[i]->getNumInteriorRings(); ++r) {
+      polygon.inner_rings.emplace_back();
+      OGRLinearRing *inner_ring = road_polygons[i]->getInteriorRing(r);
+      for (int v = 0; v < inner_ring->getNumPoints(); ++v) {
+        polygon.inner_rings.back().points.emplace_back(inner_ring->getX(v), inner_ring->getY(v));
       }
     }
-    if (best_distance <= classification_distance) {
-      road_classes[i] = best_class;
-      road_attributes[i] = best_attributes;
+    triangulate_polygon(polygon);
+    if (polygon.triangulation.number_of_faces() == 0) {
+      split_polygons.push_back(road_polygons[i]->clone()->toPolygon());
+      split_classes.push_back("Road");
+      split_attributes.emplace_back();
+      continue;
     }
+    
+    // Classify each interior triangle by its nearest segment
+    for (auto const &face: polygon.triangulation.finite_face_handles()) {
+      face->info().road_segment = -1;
+      face->info().grouped = false;
+    } for (auto const &face: polygon.triangulation.finite_face_handles()) {
+      if (!face->info().interior) continue;
+      const double cx = (CGAL::to_double(face->vertex(0)->point().x())+CGAL::to_double(face->vertex(1)->point().x())+CGAL::to_double(face->vertex(2)->point().x()))/3.0;
+      const double cy = (CGAL::to_double(face->vertex(0)->point().y())+CGAL::to_double(face->vertex(1)->point().y())+CGAL::to_double(face->vertex(2)->point().y()))/3.0;
+      std::vector<std::size_t> candidates;
+      grid.query(cx, cy, classification_distance, candidates);
+      double best_distance = std::numeric_limits<double>::max();
+      std::size_t best_segment = 0;
+      for (auto const &line_class: line_classes) {
+        double min_distance = std::numeric_limits<double>::max();
+        std::size_t nearest_segment = 0;
+        for (auto const &segment_index: candidates) {
+          const Road_segment &segment = segments[segment_index];
+          if (segment.semantic_class != line_class.semantic_class) continue;
+          const double distance = point_segment_distance(cx, cy, segment);
+          if (distance < min_distance) {
+            min_distance = distance;
+            nearest_segment = segment_index;
+          }
+        } if (min_distance < best_distance) {
+          best_distance = min_distance;
+          best_segment = nearest_segment;
+        }
+      } if (best_distance <= classification_distance) face->info().road_segment = best_segment;
+    }
+    
+    // Merge adjacent triangles belonging to the same segment into groups
+    std::vector<std::vector<Triangulation::Face_handle>> groups;
+    for (auto const &face: polygon.triangulation.finite_face_handles()) {
+      if (!face->info().interior || face->info().grouped) continue;
+      std::vector<Triangulation::Face_handle> group;
+      std::list<Triangulation::Face_handle> to_check;
+      face->info().grouped = true;
+      to_check.push_back(face);
+      while (!to_check.empty()) {
+        Triangulation::Face_handle current = to_check.front();
+        to_check.pop_front();
+        group.push_back(current);
+        for (int neighbour = 0; neighbour < 3; ++neighbour) {
+          Triangulation::Face_handle next = current->neighbor(neighbour);
+          if (!polygon.triangulation.is_infinite(next) && next->info().interior && !next->info().grouped && next->info().road_segment == face->info().road_segment) {
+            next->info().grouped = true;
+            to_check.push_back(next);
+          }
+        }
+      } groups.push_back(group);
+    }
+    
+    // Union the triangles of each group into polygons carrying the segment's class and attributes
+    for (auto const &group: groups) {
+      std::string semantic_class = "Road";
+      std::map<std::string, std::string> attributes;
+      if (group.front()->info().road_segment >= 0) {
+        const Road_segment &segment = segments[group.front()->info().road_segment];
+        semantic_class = segment.semantic_class;
+        attributes = segment.attributes;
+      }
+      OGRMultiPolygon group_triangles;
+      for (auto const &face: group) {
+        OGRLinearRing ring;
+        for (int v = 0; v < 3; ++v) ring.addPoint(CGAL::to_double(face->vertex(v)->point().x()), CGAL::to_double(face->vertex(v)->point().y()));
+        ring.closeRings();
+        OGRPolygon triangle;
+        triangle.addRing(&ring);
+        group_triangles.addGeometry(&triangle);
+      }
+      OGRGeometry *union_geometry = group_triangles.UnionCascaded();
+      if (union_geometry == NULL || union_geometry->IsEmpty()) continue;
+      const OGRwkbGeometryType union_type = wkbFlatten(union_geometry->getGeometryType());
+      std::vector<OGRPolygon*> union_polygons;
+      if (union_type == wkbPolygon) {
+        union_polygons.push_back(union_geometry->toPolygon()->clone()->toPolygon());
+      } else if (union_type == wkbMultiPolygon) {
+        OGRMultiPolygon *multipolygon = union_geometry->toMultiPolygon();
+        for (int current_polygon = 0; current_polygon < multipolygon->getNumGeometries(); ++current_polygon) {
+          union_polygons.push_back(multipolygon->getGeometryRef(current_polygon)->clone()->toPolygon());
+        }
+      }
+      OGRGeometryFactory::destroyGeometry(union_geometry);
+      for (auto *polygon_result: union_polygons) {
+        split_polygons.push_back(polygon_result);
+        split_classes.push_back(semantic_class);
+        split_attributes.push_back(attributes);
+      }
+    }
+  }
+  
+  road_polygons = split_polygons;
+  road_classes = split_classes;
+  road_attributes = split_attributes;
+  
+  std::size_t n_road = 0, n_railway = 0, n_waterbody = 0;
+  for (std::size_t i = 0; i < road_polygons.size(); ++i) {
     if (road_classes[i] == "Road") ++n_road;
     else if (road_classes[i] == "Railway") ++n_railway;
     else if (road_classes[i] == "WaterBody") ++n_waterbody;
@@ -1010,6 +1281,7 @@ void classify_road_polygons(const Config &config, std::vector<OGRPolygon*> &road
   for (auto &line_class: line_classes) {
     for (auto *geometry: line_class.geometries) OGRGeometryFactory::destroyGeometry(geometry);
   }
+  return true;
 }
 
 // Generate road polygons: union of city blocks, water bodies and land-use features, then the complement within the study area
@@ -1100,7 +1372,7 @@ void generate_road_polygons(Config &config, Map &map) {
   // Classify the gaps by proximity to INEGI line layers (Road/Railway/WaterBody)
   std::vector<std::string> road_classes(road_polygons.size(), "Road");
   std::vector<std::map<std::string, std::string>> road_attributes(road_polygons.size());
-  classify_road_polygons(config, road_polygons, road_classes, road_attributes);
+  const bool road_polygons_owned = classify_road_polygons(config, road_polygons, road_classes, road_attributes);
   
   // Write to output file if requested
   if (!config.roads_output_path.empty()) {
@@ -1120,9 +1392,17 @@ void generate_road_polygons(Config &config, Map &map) {
           class_field.SetWidth(16);
           layer->CreateField(&class_field);
           for (std::size_t i = 0; i < road_polygons.size(); ++i) {
+            for (auto const &attribute: road_attributes[i]) {
+              if (layer->FindFieldIndex(attribute.first.c_str(), TRUE) < 0) {
+                OGRFieldDefn attribute_field(attribute.first.c_str(), OFTString);
+                attribute_field.SetWidth(64);
+                layer->CreateField(&attribute_field);
+              }
+            }
             OGRFeature *feature = OGRFeature::CreateFeature(layer->GetLayerDefn());
             feature->SetGeometry(road_polygons[i]);
             feature->SetField("class", road_classes[i].c_str());
+            for (auto const &attribute: road_attributes[i]) feature->SetField(attribute.first.c_str(), attribute.second.c_str());
             if (layer->CreateFeature(feature) != OGRERR_NONE) {
               std::cerr << "Error: Could not write road polygon." << std::endl;
             } OGRFeature::DestroyFeature(feature);
@@ -1153,6 +1433,11 @@ void generate_road_polygons(Config &config, Map &map) {
         map.polygons.back().inner_rings.back().points.emplace_back(inner_ring->getX(current_vertex), inner_ring->getY(current_vertex));
       }
     }
+  }
+  
+  // Free the per-segment polygons generated by the splitter (when it ran)
+  if (road_polygons_owned) {
+    for (auto *polygon: road_polygons) OGRGeometryFactory::destroyGeometry(polygon);
   }
   
   OGRGeometryFactory::destroyGeometry(non_road_union);
@@ -1827,34 +2112,12 @@ int main(int argc, const char * argv[]) {
   // Triangulate polygons
   current_polygon = map.polygons.begin();
   while (current_polygon != map.polygons.end()) {
-      
-    // Insert the edges of the polygon as constraints
-    std::vector<Kernel::Point_2>::const_iterator current_point = current_polygon->outer_ring.points.begin();
-    Triangulation::Vertex_handle current_vertex = current_polygon->triangulation.insert(*current_point);
-    ++current_point;
-    Triangulation::Vertex_handle previous_vertex;
-    while (current_point != current_polygon->outer_ring.points.end()) {
-      previous_vertex = current_vertex;
-      current_vertex = current_polygon->triangulation.insert(*current_point);
-      if (previous_vertex != current_vertex) current_polygon->triangulation.odd_even_insert_constraint(previous_vertex, current_vertex);
-      ++current_point;
-    } for (auto const &ring: current_polygon->inner_rings) {
-      current_point = ring.points.begin();
-      current_vertex = current_polygon->triangulation.insert(*current_point);
-      while (current_point != ring.points.end()) {
-        previous_vertex = current_vertex;
-        current_vertex = current_polygon->triangulation.insert(*current_point);
-        if (previous_vertex != current_vertex) current_polygon->triangulation.odd_even_insert_constraint(previous_vertex, current_vertex);
-        ++current_point;
-      }
-    } if (current_polygon->triangulation.number_of_faces() == 0) {
+    triangulate_polygon(*current_polygon);
+    if (current_polygon->triangulation.number_of_faces() == 0) {
       std::cout << "Deleting degenerate polygon (no triangles after insertion of constraints)..." << std::endl;
       current_polygon = map.polygons.erase(current_polygon);
       continue;
     }
-    
-    // Label the triangles to find out interior/exterior
-    label_polygon(*current_polygon);
     
     // Check if the result isn't degenerate
     std::size_t interior_triangles = 0;
