@@ -75,7 +75,9 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 
 ```
 3dcm-mexico/
-├── elevadormx/                # Main C++ tool (Xcode project)
+├── CMakeLists.txt             # CMake build (alternative to the Xcode project)
+├── elevadormx/                # Main C++ tool
+│   ├── elevadormx.xcodeproj/  # Xcode project (macOS)
 │   └── elevadormx/
 │       ├── main.cpp           # Pipeline: TIN building, polygon lifting, walls, OBJ/CityJSON output
 │       ├── Quadtree.h                         # Spatial index for the point clouds
@@ -95,7 +97,21 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 - **CGAL** — constrained Delaunay triangulation, point clouds, geometric predicates
 - **nlohmann/json** — CityJSON output
 
-On macOS with Homebrew: `brew install gdal cgal nlohmann-json`. The Xcode project expects these under `/opt/homebrew`; adjust `HEADER_SEARCH_PATHS` / `LIBRARY_SEARCH_PATHS` if your install differs.
+On macOS with Homebrew: `brew install gdal cgal nlohmann-json` (plus `gmp mpfr`, pulled in as CGAL dependencies). The build expects these under `/opt/homebrew`; adjust `HEADER_SEARCH_PATHS` / `LIBRARY_SEARCH_PATHS` (Xcode) or pass `-DCMAKE_PREFIX_PATH` (CMake) if your install differs.
+
+Build with CMake (recommended) or Xcode:
+
+```sh
+# CMake
+cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-cmake -j
+./build-cmake/elevadormx --config config.example.json
+
+# Xcode
+xcodebuild -project elevadormx/elevadormx.xcodeproj -scheme elevadormx \
+  -configuration Debug -derivedDataPath build build
+./build/Build/Products/Debug/elevadormx --config config.example.json
+```
 
 ---
 
@@ -159,7 +175,7 @@ The two raster paths (`--dsm`, `--dtm`) and the three output paths are required;
 | `--bucket_size`, `--maximum_depth` | Quadtree tuning |
 | `--decimal_digits` | Output coordinate precision |
 
-Build in Xcode, then run. Outputs are written to:
+Build with CMake or Xcode (see [Dependencies](#dependencies)), then run. Outputs are written to:
 
 - `terrain.obj` — simplified DTM TIN (debug/parameter tuning)
 - `buildings_masked.tif` — object heights (DSM−DTM) with roads/water/green masked to NODATA

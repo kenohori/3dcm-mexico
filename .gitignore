@@ -24,6 +24,7 @@ xcuserdata/
 
 # Build output directories
 build/
+build-cmake/
 DerivedData/
 
 # Local source data (INEGI rasters and vectors)

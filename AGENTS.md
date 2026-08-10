@@ -14,6 +14,7 @@ The methodology:
 ## Repository layout
 
 ```
+├── CMakeLists.txt             # CMake build (find_package gdal/cgal/nlohmann-json)
 ├── config.example.json        # Template for the C++ tool's CLI/config interface
 ├── elevadormx/
 │   ├── elevadormx.xcodeproj/  # Xcode project (macOS only)
@@ -28,13 +29,25 @@ The methodology:
 
 ## Build & run
 
-**macOS + Xcode only.** Depends on Homebrew `gdal`, `cgal`, `gmp`, `mpfr` (and `nlohmann-json` headers). The Xcode project links GDAL via the `libgdal.dylib` symlink in `/opt/homebrew/lib`, so it survives Homebrew upgrades; `gmp`/`mpfr` are needed by CGAL's exact kernel (used for the constrained triangulations; the road-polygon Boolean operations use GEOS through OGR).
+**macOS only.** Depends on Homebrew `gdal`, `cgal`, `gmp`, `mpfr` (and `nlohmann-json` headers). `gmp`/`mpfr` are needed by CGAL's exact kernel (used for the constrained triangulations; the road-polygon Boolean operations use GEOS through OGR).
+
+Build with CMake (preferred for non-Xcode workflows):
+
+```sh
+cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-cmake -j
+./build-cmake/elevadormx --config config.example.json
+```
+
+Or with Xcode:
 
 ```sh
 xcodebuild -project elevadormx/elevadormx.xcodeproj -scheme elevadormx \
   -configuration Debug -derivedDataPath build build
 ./build/Build/Products/Debug/elevadormx --config config.example.json
 ```
+
+The Xcode project links GDAL via the `libgdal.dylib` symlink in `/opt/homebrew/lib`, so it survives Homebrew upgrades; the CMake build locates the same libraries via `find_package`.
 
 The C++ tool accepts `--key value` CLI args and/or `--config <file.json>` (JSON config overrides defaults; CLI args override the config file). Required: `--dsm`, `--dtm`, `--terrain_obj`, `--obj`, `--cityjson`. See `config.example.json` for the full key list. `main.cpp` prints the effective config on startup and validates required paths before doing any work.
 
