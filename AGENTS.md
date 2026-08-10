@@ -8,14 +8,12 @@ Guidance for AI agents (and humans) working in this repository.
 
 The methodology:
 1. INEGI 1:50k topographic vectors (`data/topo/`) provide city blocks, roads (as lines), water bodies, public areas, etc. Building footprints are **not** available — they are extracted from elevation data.
-2. Building footprints are extracted from a DSM by region growing (`grow_building_footprints` in `main.cpp`, ported from `buildinggrower.py`), masked to exclude roads/green/water (`mask_building_areas`).
+2. Building footprints are extracted from a DSM by region growing (`grow_building_footprints` in `main.cpp`, originally ported from a Python prototype), masked to exclude roads/green/water (`mask_building_areas`).
 3. The C++ tool `elevadormx` reads the DSM/DTM rasters + vector layers, builds a simplified DTM TIN, repairs/triangulates polygons, lifts them to 3D (three rules), generates vertical walls, and writes OBJ + CityJSON.
 
 ## Repository layout
 
 ```
-├── buildinggrower.py          # Reference Python region-growing (superseded by C++ --grow_output)
-├── reorder.py                 # One-off INEGI DTM tile reorganisation (Python, historical)
 ├── config.example.json        # Template for the C++ tool's CLI/config interface
 ├── elevadormx/
 │   ├── elevadormx.xcodeproj/  # Xcode project (macOS only)
@@ -37,8 +35,6 @@ xcodebuild -project elevadormx/elevadormx.xcodeproj -scheme elevadormx \
   -configuration Debug -derivedDataPath build build
 ./build/Build/Products/Debug/elevadormx --config config.example.json
 ```
-
-Python scripts need `rasterio`, `numpy` (and optionally `geopandas`/`fiona` for data inspection).
 
 The C++ tool accepts `--key value` CLI args and/or `--config <file.json>` (JSON config overrides defaults; CLI args override the config file). Required: `--dsm`, `--dtm`, `--terrain_obj`, `--obj`, `--cityjson`. See `config.example.json` for the full key list. `main.cpp` prints the effective config on startup and validates required paths before doing any work.
 

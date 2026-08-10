@@ -54,7 +54,7 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 ### Pipeline stages
 
 1. **Download INEGI data** — the 1:50 000 vector topographic dataset, plus the higher-resolution DSM/DTM rasters available for parts of the country (in this paper, 1.5 m data around Mexico City).
-2. **Reorder tiles** (`reorder.py`) — a one-off script that renames/organises downloaded INEGI DTM tiles (strips `conjunto_de_datos`/`metadatos` wrappers, names folders by their 8-character tile code).
+2. **Reorder tiles** — a one-off manual step that renames/organises downloaded INEGI DTM tiles (strips `conjunto_de_datos`/`metadatos` wrappers, names folders by their 8-character tile code).
 3. **Road polygons** *(C++, from `manzana_a`)* — the city blocks from the topography are read and unioned (via GEOS through OGR), along with the water bodies (`--waterbody`) and any land-use features (`--land_use`, comma-separated paths, e.g. INEGI `granja_a`, `ins_deportiv_a`, `cementerio_a`, `area_publica_a`). The complement within the study area (the DSM tile extent, or a custom `study_area`) is taken as the road polygons, so water bodies and land-use areas become holes in the roads. A first approximation classifies the remaining gaps as roads; classification by proximity to the `vialidad_l` line features is planned.
 4. **Building footprints** *(C++, except Visvalingam–Whyatt simplification)*:
    - Subtract the DTM from the DSM to get object heights, and mask areas where buildings should not exist (roads, railways, water streams, green areas, water bodies) to NODATA *(C++, `--mask_output`, using the available Road/WaterBody/PlantCover layers)*.
@@ -75,8 +75,6 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 
 ```
 3dcm-mexico/
-├── buildinggrower.py          # Reference Python region-growing (superseded by C++ `--grow_output`)
-├── reorder.py                 # One-off INEGI DTM tile reorganisation (Python)
 ├── elevadormx/                # Main C++ tool (Xcode project)
 │   └── elevadormx/
 │       ├── main.cpp           # Pipeline: TIN building, polygon lifting, walls, OBJ/CityJSON output
@@ -96,7 +94,6 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 - **GDAL/OGR** — raster & vector I/O
 - **CGAL** — constrained Delaunay triangulation, point clouds, geometric predicates
 - **nlohmann/json** — CityJSON output
-- Python 3 + **rasterio**/**numpy** (only for `buildinggrower.py`)
 
 On macOS with Homebrew: `brew install gdal cgal nlohmann-json`. The Xcode project expects these under `/opt/homebrew`; adjust `HEADER_SEARCH_PATHS` / `LIBRARY_SEARCH_PATHS` if your install differs.
 
@@ -199,7 +196,7 @@ The following steps are still performed manually in QGIS and are intended to be 
 - [x] CLI/configuration-file support (replace hardcoded paths)
 - [x] Boolean operations for road-polygon generation (city blocks only)
 - [x] DSM−DTM subtraction and NODATA masking of forbidden areas
-- [x] Region growing (`buildinggrower.py` → C++, `--grow_output`)
+- [x] Region growing (→ C++, `--grow_output`)
 - [x] Include land-use and water features in the road-polygon union
 - [ ] Classify road polygons by proximity to `vialidad_l`/`via_ferrea_l` line features
 - [x] Raster→polygon conversion (`--buildings_output`)
