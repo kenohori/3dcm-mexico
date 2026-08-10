@@ -15,6 +15,7 @@
   "cityjson": "/path/to/cdmx.city.json",
   "mask_output": "/path/to/buildings_masked.tif",
   "grow_output": "/path/to/building_labels.tif",
+  "buildings_output": "/path/to/building_footprints.gpkg",
   "seed_threshold": 10.0,
   "tall_building_height": 100.0,
   "tall_tolerance": 15.0,

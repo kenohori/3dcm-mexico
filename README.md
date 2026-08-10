@@ -54,7 +54,7 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
    - Subtract the DTM from the DSM to get object heights, and mask areas where buildings should not exist (roads, railways, water streams, green areas, water bodies) to NODATA *(C++, `--mask_output`, using the available Road/WaterBody/PlantCover layers)*.
    - Region growing *(C++, `--grow_output`)* from seed points ≥ 10 m, with an adaptive height tolerance (15 m for buildings taller than 100 m, 0.75 m otherwise) and 4-connectivity.
    - Keep only footprints ≥ 45 pixels (~100 m²).
-   - Polygonise the labelled raster and simplify with Visvalingam–Whyatt (tolerance 3 m) *(manual in QGIS)*.
+   - Polygonise the labelled raster *(C++, `--buildings_output`)*; simplification with Visvalingam–Whyatt (tolerance 3 m) is still manual in QGIS.
 5. **Preprocessing** *(C++)* — all polygons are repaired and triangulated (constrained Delaunay triangulation + odd-even interior/exterior labelling, per Ledoux et al. 2014). A simplified DTM is built as a TIN from points every 30 m, each set to the median of DTM points within a 120 m radius.
 6. **Polygon lifting** *(C++)* — three lifting rules:
    - *Flat:* each building footprint is raised to the 90th percentile of the DSM heights inside it.
@@ -145,6 +145,7 @@ The two raster paths (`--dsm`, `--dtm`) and the three output paths are required;
 | `--mask_output` | Write the object-height raster (DSM−DTM) with roads/water/green masked to NODATA |
 | `--building_mask` | Masked object-height raster to grow buildings from (defaults to `--mask_output` output) |
 | `--grow_output` | Write the region-growing building labels (uint32 raster) |
+| `--buildings_output` | Write the polygonised building footprints (`.gpkg`) |
 | `--seed_threshold`, `--tall_building_height`, `--tall_tolerance`, `--normal_tolerance`, `--minimum_region_area` | Region-growing parameters |
 | `--dtm_cell_size`, `--dtm_search_radius`, `--dtm_ratio_to_use` | Simplified DTM TIN parameters |
 | `--building_height_percentile` | Building height percentile (flat lifting) |
@@ -192,7 +193,7 @@ The following steps are still performed manually in QGIS and are intended to be 
 - [x] Region growing (`buildinggrower.py` → C++, `--grow_output`)
 - [x] Include land-use and water features in the road-polygon union
 - [ ] Classify road polygons by proximity to `vialidad_l`/`via_ferrea_l` line features
-- [ ] Raster→polygon conversion and Visvalingam–Whyatt simplification
+- [ ] Raster→polygon conversion *(done in-tool via `--buildings_output`)* and Visvalingam–Whyatt simplification
 
 ## Citing
 

@@ -20,7 +20,7 @@ The methodology:
 ├── elevadormx/
 │   ├── elevadormx.xcodeproj/  # Xcode project (macOS only)
 │   └── elevadormx/
-│       ├── main.cpp           # Entire pipeline (single translation unit, ~1070 lines)
+│       ├── main.cpp           # Entire pipeline (single translation unit, ~1700 lines)
 │       ├── Quadtree.h         # Spatial index for point clouds
 │       ├── Edge_map.h         # Edge adjacency index (currently unused/dead code)
 │       └── Enhanced_constrained_triangulation_2.h  # CDT with odd-even constraint insertion
@@ -52,7 +52,7 @@ The C++ tool accepts `--key value` CLI args and/or `--config <file.json>` (JSON 
 
 ## Gotchas & known issues
 
-- **`elevadormx` assumes pre-generated inputs.** It reads building footprints, water bodies, plant cover, and terrain from vector layers (`.gpkg`) — those are still done in Python/QGIS. Road polygons, however, can now be generated in-tool from the INEGI `manzana_a` city-block layer, optionally subtracting water bodies (`--waterbody`) and land-use layers (`--land_use`) via GEOS Boolean operations (`--generate_roads true`), skipping the `--road` input.
+- **`elevadormx` assumes pre-generated inputs.** It reads building footprints, water bodies, plant cover, and terrain from vector layers (`.gpkg`) — water bodies, plant cover, and terrain are still done in Python/QGIS. Building footprints and road polygons, however, can now be generated in-tool: roads from the INEGI `manzana_a` city-block layer, optionally subtracting water bodies (`--waterbody`) and land-use layers (`--land_use`) via GEOS Boolean operations (`--generate_roads true`, skipping the `--road` input); building footprints by raster→polygon of the region-growing labels (`--buildings_output`).
 - **Road-polygon Booleans use GEOS, not CGAL's exact kernel.** CGAL `Polygon_set_2` crashes with `res != EQUAL` on the shared/partially-collinear boundaries between INEGI water bodies and city blocks; GEOS (via OGR `UnionCascaded`/`Difference`) handles them robustly.
 - **`GDALRasterizeGeometries` silently drops polygons when called with many geometries at once.** Observed: only 9 of 54 PlantCover polygons got burned into the building mask, so green areas were not masked and region growing produced buildings inside them. `mask_building_areas` therefore rasterizes the mask **one geometry per call** (`nGeomCount=1`, matching how `gdal_rasterize`/`GDALRasterizeLayers` works). Do not revert to a single multi-geometry call.
 - **Do not re-close rings that are already closed** when building OGR geometries in `mask_building_areas`. OGR rings read from a source layer are closed, and re-adding the first point produces a degenerate duplicate closing point that makes some polygons fail to rasterize. Guard the closure with a `back() != front()` check (as the polygon-repair step does).

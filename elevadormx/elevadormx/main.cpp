@@ -112,6 +112,7 @@ struct Config {
   std::string mask_output_path;
   std::string building_mask_path;
   std::string grow_output_path;
+  std::string buildings_output_path;
   double seed_threshold = 10.0;
   double tall_building_height = 100.0;
   double tall_tolerance = 15.0;
@@ -152,6 +153,7 @@ struct Config {
     else if (key == "mask_output") mask_output_path = value;
     else if (key == "building_mask") building_mask_path = value;
     else if (key == "grow_output") grow_output_path = value;
+    else if (key == "buildings_output") buildings_output_path = value;
     else if (key == "seed_threshold") seed_threshold = std::stod(value);
     else if (key == "tall_building_height") tall_building_height = std::stod(value);
     else if (key == "tall_tolerance") tall_tolerance = std::stod(value);
@@ -202,6 +204,7 @@ struct Config {
     std::cout << "\tMask output: " << mask_output_path << "\n";
     std::cout << "\tBuilding mask: " << building_mask_path << "\n";
     std::cout << "\tGrow output: " << grow_output_path << "\n";
+    std::cout << "\tBuildings output: " << buildings_output_path << "\n";
     std::cout << "\tSeed threshold: " << seed_threshold << "\n";
     std::cout << "\tTall building height: " << tall_building_height << "\n";
     std::cout << "\tTall tolerance: " << tall_tolerance << "\n";
@@ -1102,6 +1105,65 @@ void mask_building_areas(const Config &config, Map &map) {
   GDALClose(dsm_dataset);
 }
 
+// Convert the labelled building raster to vector footprints (replaces the manual QGIS polygonisation step)
+void polygonize_buildings(const Config &config, GDALRasterBand *labels_band, int width, int height) {
+  GDALDriver *driver = GetGDALDriverManager()->GetDriverByName("GPKG");
+  if (driver == NULL) {
+    std::cerr << "Error: GPKG driver not available." << std::endl;
+    return;
+  }
+  
+  GDALDataset *output = driver->Create(config.buildings_output_path.c_str(), 0, 0, 0, GDT_Unknown, NULL);
+  if (output == NULL) {
+    std::cerr << "Error: Could not create " << config.buildings_output_path << std::endl;
+    return;
+  }
+  
+  OGRSpatialReference output_srs;
+  if (output_srs.SetFromUserInput(labels_band->GetDataset()->GetProjectionRef()) != OGRERR_NONE) {
+    std::cerr << "Warning: Could not parse raster SRS, writing without a spatial reference." << std::endl;
+  }
+  OGRLayer *layer = output->CreateLayer("Building", &output_srs, wkbPolygon, NULL);
+  if (layer == NULL) {
+    std::cerr << "Error: Could not create Building layer." << std::endl;
+    GDALClose(output);
+    return;
+  }
+  OGRFieldDefn building_field("building", OFTInteger);
+  building_field.SetWidth(10);
+  layer->CreateField(&building_field);
+  
+  // Build a mask band so the background (label 0) is not polygonized
+  GDALDriver *mem_driver = GetGDALDriverManager()->GetDriverByName("MEM");
+  GDALDataset *mask_dataset = mem_driver->Create("mask", width, height, 1, GDT_Byte, NULL);
+  GDALRasterBand *mask_band = mask_dataset->GetRasterBand(1);
+  unsigned char *mask = new unsigned char[width*height];
+  unsigned int *labels = new unsigned int[width*height];
+  if (labels_band->RasterIO(GF_Read, 0, 0, width, height, labels, width, height, GDT_UInt32, 0, 0) != CE_None) {
+    std::cerr << "Error: Could not read building labels for polygonisation." << std::endl;
+    delete[] mask; delete[] labels;
+    GDALClose(mask_dataset);
+    GDALClose(output);
+    return;
+  }
+  for (int i = 0; i < width*height; ++i) mask[i] = (labels[i] != 0) ? 1 : 0;
+  if (mask_band->RasterIO(GF_Write, 0, 0, width, height, mask, width, height, GDT_Byte, 0, 0) != CE_None) {
+    std::cerr << "Error: Could not write mask band." << std::endl;
+  }
+  delete[] labels; delete[] mask;
+  
+  char **options = NULL;
+  options = CSLSetNameValue(options, "8CONNECTED", "FALSE");
+  if (GDALPolygonize(labels_band, mask_band, layer, 0, options, NULL, NULL) != CE_None) {
+    std::cerr << "Error: GDALPolygonize failed." << std::endl;
+  } else {
+    std::cout << "Polygonised building labels into " << layer->GetFeatureCount() << " footprints, wrote to " << config.buildings_output_path << std::endl;
+  }
+  CSLDestroy(options);
+  GDALClose(mask_dataset);
+  GDALClose(output);
+}
+
 // Extract building footprints by region growing on the masked object-height raster
 void grow_building_footprints(const Config &config) {
   const std::string mask_path = config.building_mask_path.empty() ? config.mask_output_path : config.building_mask_path;
@@ -1203,8 +1265,13 @@ void grow_building_footprints(const Config &config) {
     output_band->SetNoDataValue(0);
     if (output_band->RasterIO(GF_Write, 0, 0, width, height, building_id, width, height, GDT_UInt32, 0, 0) != CE_None) {
       std::cerr << "Error: Could not write building labels." << std::endl;
+    } else {
+      output_band->FlushCache();
+      std::cout << "Wrote building labels to " << config.grow_output_path << std::endl;
+      if (!config.buildings_output_path.empty()) {
+        polygonize_buildings(config, output_band, width, height);
+      }
     } GDALClose(output_dataset);
-    std::cout << "Wrote building labels to " << config.grow_output_path << std::endl;
   }
   
   delete[] heights; delete[] building_id; delete[] region_stamp;
