@@ -1507,7 +1507,7 @@ int main(int argc, const char * argv[]) {
             wkbFlatten(input_feature->GetGeometryRef()->getGeometryType()) == wkbTriangle) {
           OGRPolygon *input_polygon = input_feature->GetGeometryRef()->toPolygon();
           map.polygons.emplace_back();
-          map.polygons.back().id = std::to_string(input_feature->GetFID());
+          map.polygons.back().id = path.first + "-" + std::to_string(input_feature->GetFID());
           map.polygons.back().semantic_class = path.first;
           for (int current_vertex = 0; current_vertex < input_polygon->getExteriorRing()->getNumPoints(); ++current_vertex) {
             map.polygons.back().outer_ring.points.emplace_back(input_polygon->getExteriorRing()->getX(current_vertex),
@@ -1526,7 +1526,7 @@ int main(int argc, const char * argv[]) {
           for (int current_polygon = 0; current_polygon < input_multipolygon->getNumGeometries(); ++current_polygon) {
             OGRPolygon *input_polygon = input_multipolygon->getGeometryRef(current_polygon);
             map.polygons.emplace_back();
-            map.polygons.back().id = std::to_string(input_feature->GetFID()) + "-" + std::to_string(current_polygon);
+            map.polygons.back().id = path.first + "-" + std::to_string(input_feature->GetFID()) + "-" + std::to_string(current_polygon);
             map.polygons.back().semantic_class = path.first;
             for (int current_vertex = 0; current_vertex < input_polygon->getExteriorRing()->getNumPoints(); ++current_vertex) {
               map.polygons.back().outer_ring.points.emplace_back(input_polygon->getExteriorRing()->getX(current_vertex),

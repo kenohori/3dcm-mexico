@@ -6,6 +6,8 @@ This repository contains the code behind the paper *"Creating 3D city models of 
 
 The work is partly based on [elevador](https://github.com/kenohori/elevador), which itself draws on the methodologies of [3dfier](https://tudelft3d.github.io/3dfier/) and [City4CFD](https://github.com/tudelft3d/city4cfd).
 
+> **Note on the paper.** The published paper (see [Citing](#citing)) describes the implementation as it was at the time of writing. Since then, several steps it describes as manual — road-polygon Boolean operations, DSM−DTM masking, region growing and raster→polygon conversion — have been folded into the C++ tool (see [Roadmap](#roadmap--planned-integration)). This README describes the current code.
+
 ---
 
 ## Methodology overview
@@ -17,32 +19,36 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
                     │                      INEGI open data                     │
                     │  1:50k vector topography     DSM / DTM elevation rasters │
                     └─────────────────────────────────────────────────────────┘
-                                      │
-                   ┌──────────────────┼───────────────────┐
-                   ▼                  ▼                   ▼
-            road polygons      building footprints      other polygons
-            (Boolean union of  (region growing on       (water bodies, plant
-             city blocks →      DSM−DTM masked to       cover, terrain from
-             complement)        roads/greens)             city blocks)
-                   │                  │                   │
-                   │                  │                   │
-                   └──────────────────┼───────────────────┘
-                                      ▼
-                         ┌────────────────────────────┐
-                         │   elevadormx (C++)          │
-                         │  1. DTM → simplified TIN    │
-                         │  2. repair + triangulate    │
-                         │     polygons (CGAL)         │
-                         │  3. lift polygons to 3D     │
-                         │     (flat / vertex / +pts)  │
-                         │  4. generate vertical walls │
-                         │  5. write OBJ + CityJSON    │
-                         └────────────────────────────┘
-                                      │
-                     ┌────────────────┴────────────────┐
-                     ▼                                 ▼
-                3D model (.obj)                   CityJSON (.city.json)
-                for viewing                    with semantics per object
+                                       │
+                    ┌──────────────────┼───────────────────┐
+                    ▼                  ▼                   ▼
+                       city blocks +     other polygons          DSM / DTM
+                        land use /       (water bodies,          elevation
+                        water bdry        plant cover,            rasters
+                       (road holes)       terrain from
+                                          city blocks)
+                    │                  │                   │
+                    │                  │                   │
+                    └──────────────────┼───────────────────┘
+                                       ▼
+                    ┌──────────────────────────────────────────┐
+                    │   elevadormx (C++)                       │
+                    │  • generate road polygons (GEOS)         │
+                    │    (union of city blocks → complement)   │
+                    │  • extract building footprints           │
+                    │    (DSM−DTM mask + region growing)       │
+                    │  1. DTM → simplified TIN                 │
+                    │  2. repair + triangulate polygons (CGAL) │
+                    │  3. lift polygons to 3D                  │
+                    │     (flat / vertex / +pts)               │
+                    │  4. generate vertical walls              │
+                    │  5. write OBJ + CityJSON                 │
+                    └──────────────────────────────────────────┘
+                                       │
+                    ┌──────────────────┴───────────────────┐
+                    ▼                                          ▼
+             3D model (.obj)                         CityJSON (.city.json)
+               for viewing                         with semantics per object
 ```
 
 ### Pipeline stages
@@ -50,7 +56,7 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
 1. **Download INEGI data** — the 1:50 000 vector topographic dataset, plus the higher-resolution DSM/DTM rasters available for parts of the country (in this paper, 1.5 m data around Mexico City).
 2. **Reorder tiles** (`reorder.py`) — a one-off script that renames/organises downloaded INEGI DTM tiles (strips `conjunto_de_datos`/`metadatos` wrappers, names folders by their 8-character tile code).
 3. **Road polygons** *(C++, from `manzana_a`)* — the city blocks from the topography are read and unioned (via GEOS through OGR), along with the water bodies (`--waterbody`) and any land-use features (`--land_use`, comma-separated paths, e.g. INEGI `granja_a`, `ins_deportiv_a`, `cementerio_a`, `area_publica_a`). The complement within the study area (the DSM tile extent, or a custom `study_area`) is taken as the road polygons, so water bodies and land-use areas become holes in the roads. A first approximation classifies the remaining gaps as roads; classification by proximity to the `vialidad_l` line features is planned.
-4. **Building footprints** *(partly manual)*:
+4. **Building footprints** *(C++, except Visvalingam–Whyatt simplification)*:
    - Subtract the DTM from the DSM to get object heights, and mask areas where buildings should not exist (roads, railways, water streams, green areas, water bodies) to NODATA *(C++, `--mask_output`, using the available Road/WaterBody/PlantCover layers)*.
    - Region growing *(C++, `--grow_output`)* from seed points ≥ 10 m, with an adaptive height tolerance (15 m for buildings taller than 100 m, 0.75 m otherwise) and 4-connectivity.
    - Keep only footprints ≥ 45 pixels (~100 m²).
@@ -119,7 +125,6 @@ elevadormx \
   --terrain  .../terrain.gpkg \
   --generate_roads true \
   --city_blocks .../manzana_a.shp \
-  --waterbody .../cuerpo_agua_a.shp \
   --land_use .../granja_a.shp,.../ins_deportiv_a.shp,.../cementerio_a.shp \
   --roads_output .../roads.gpkg \
   --study_area 476634,2142300,482533.5,2149281 \
@@ -170,6 +175,7 @@ Build in Xcode, then run. Outputs are written to:
 | `minimum_region_area = 45` | config / CLI | Minimum footprint size in pixels |
 | `dtm_cell_size = 30.0` | config / CLI | Grid spacing of the simplified DTM TIN |
 | `dtm_search_radius = 120.0` | config / CLI | Radius around each TIN point |
+| `dtm_ratio_to_use = 0.5` | config / CLI | Quantile of DTM points used as each TIN point's elevation (0.5 = median) |
 | `building_height_percentile = 0.9` | config / CLI | Building height percentile (flat lifting) |
 | `bucket_size` / `maximum_depth` | config / CLI | Quadtree tuning |
 
@@ -193,7 +199,8 @@ The following steps are still performed manually in QGIS and are intended to be 
 - [x] Region growing (`buildinggrower.py` → C++, `--grow_output`)
 - [x] Include land-use and water features in the road-polygon union
 - [ ] Classify road polygons by proximity to `vialidad_l`/`via_ferrea_l` line features
-- [ ] Raster→polygon conversion *(done in-tool via `--buildings_output`)* and Visvalingam–Whyatt simplification
+- [x] Raster→polygon conversion (`--buildings_output`)
+- [ ] Visvalingam–Whyatt simplification of building footprints
 
 ## Citing
 
