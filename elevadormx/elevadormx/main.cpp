@@ -6,6 +6,9 @@
 #include <deque>
 #include <queue>
 #include <functional>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 
 #include <ogrsf_frmts.h>
 #include <gdal_priv.h>
@@ -139,6 +142,12 @@ struct Config {
   double study_x_min = 0.0, study_y_min = 0.0, study_x_max = 0.0, study_y_max = 0.0;
   bool study_area_set = false;
   
+  // Road polygon classification (by proximity to INEGI line layers)
+  std::string road_lines_path;
+  std::string railway_lines_path;
+  std::string stream_lines_path;
+  double line_classification_distance = 50.0;
+  
   // Apply a CLI/config-file key-value pair to this config
   void set(const std::string &key, const std::string &value) {
     if (key == "dsm") dsm_path = value;
@@ -172,6 +181,10 @@ struct Config {
     else if (key == "city_blocks") city_blocks_path = value;
     else if (key == "land_use") land_use_path = value;
     else if (key == "roads_output") roads_output_path = value;
+    else if (key == "road_lines") road_lines_path = value;
+    else if (key == "railway_lines") railway_lines_path = value;
+    else if (key == "stream_lines") stream_lines_path = value;
+    else if (key == "line_classification_distance") line_classification_distance = std::stod(value);
     else if (key == "study_area") {
       // Format: x_min,y_min,x_max,y_max
       std::stringstream value_stream(value);
@@ -228,6 +241,10 @@ struct Config {
       std::cout << "\tLand use: " << land_use_path << "\n";
       std::cout << "\tRoads output: " << roads_output_path << "\n";
       std::cout << "\tStudy area: " << study_x_min << ", " << study_y_min << ", " << study_x_max << ", " << study_y_max << "\n";
+      std::cout << "\tRoad lines (vialidad_l): " << road_lines_path << "\n";
+      std::cout << "\tRailway lines (via_ferrea_l): " << railway_lines_path << "\n";
+      std::cout << "\tStream lines (corriente_ag_l): " << stream_lines_path << "\n";
+      std::cout << "\tLine classification distance: " << line_classification_distance << "\n";
     }
   }
 };
@@ -889,6 +906,112 @@ std::vector<std::string> split_paths(const std::string &paths) {
   } return result;
 }
 
+// Read the line features of a dataset that intersect the study area, cloning their geometries and attributes for reuse
+struct Line_class {
+  std::string semantic_class;
+  std::vector<OGRGeometry*> geometries;
+  std::vector<std::map<std::string, std::string>> attributes;
+};
+
+void read_line_features(const char *path, const Config &config, Line_class &line_class) {
+  GDALDataset *dataset = (GDALDataset*) GDALOpenEx(path, GDAL_OF_READONLY, NULL, NULL, NULL);
+  if (dataset == NULL) {
+    std::cerr << "Error: Could not open line dataset: " << path << std::endl;
+    return;
+  } for (auto &&layer: dataset->GetLayers()) {
+    layer->ResetReading();
+    layer->SetSpatialFilterRect(config.study_x_min, config.study_y_min, config.study_x_max, config.study_y_max);
+    OGRFeature *feature;
+    while ((feature = layer->GetNextFeature()) != NULL) {
+      OGRGeometry *geometry = feature->GetGeometryRef();
+      if (geometry != NULL) {
+        line_class.geometries.push_back(geometry->clone());
+        std::map<std::string, std::string> attributes;
+        for (int field = 0; field < feature->GetFieldCount(); ++field) {
+          const OGRFieldDefn *field_definition = feature->GetFieldDefnRef(field);
+          if (field_definition == NULL) continue;
+          const char *field_value = feature->GetFieldAsString(field);
+          if (field_value != NULL) attributes[field_definition->GetNameRef()] = field_value;
+        } line_class.attributes.push_back(attributes);
+      }
+      OGRFeature::DestroyFeature(feature);
+    }
+  } GDALClose(dataset);
+}
+
+// Classify generated gap polygons (roads) by proximity to INEGI line layers:
+// vialidad_l -> Road, via_ferrea_l -> Railway, corriente_ag_l -> WaterBody.
+// Each gap is assigned the class of its nearest line (within line_classification_distance);
+// on ties, Road wins (checked first). Gaps with no line nearby keep the Road default.
+// The attributes of the nearest matching line are attached to the polygon for CityJSON output.
+void classify_road_polygons(const Config &config, std::vector<OGRPolygon*> &road_polygons,
+                            std::vector<std::string> &road_classes, std::vector<std::map<std::string, std::string>> &road_attributes) {
+  // Priority order Road > Railway > WaterBody decides ties (strictly-smaller replaces)
+  std::vector<Line_class> line_classes;
+  if (!config.road_lines_path.empty()) {
+    Line_class line_class;
+    line_class.semantic_class = "Road";
+    read_line_features(config.road_lines_path.c_str(), config, line_class);
+    line_classes.push_back(std::move(line_class));
+  } if (!config.railway_lines_path.empty()) {
+    Line_class line_class;
+    line_class.semantic_class = "Railway";
+    read_line_features(config.railway_lines_path.c_str(), config, line_class);
+    line_classes.push_back(std::move(line_class));
+  } if (!config.stream_lines_path.empty()) {
+    Line_class line_class;
+    line_class.semantic_class = "WaterBody";
+    read_line_features(config.stream_lines_path.c_str(), config, line_class);
+    line_classes.push_back(std::move(line_class));
+  }
+  if (line_classes.empty()) {
+    std::cout << "No line layers for road classification; keeping all generated polygons as Road." << std::endl;
+    return;
+  }
+  
+  const double classification_distance = config.line_classification_distance;
+  std::size_t n_road = 0, n_railway = 0, n_waterbody = 0;
+  for (std::size_t i = 0; i < road_polygons.size(); ++i) {
+    OGREnvelope envelope;
+    road_polygons[i]->getEnvelope(&envelope);
+    const double x_min = envelope.MinX-classification_distance, x_max = envelope.MaxX+classification_distance;
+    const double y_min = envelope.MinY-classification_distance, y_max = envelope.MaxY+classification_distance;
+    double best_distance = std::numeric_limits<double>::max();
+    std::string best_class;
+    std::map<std::string, std::string> best_attributes;
+    for (auto const &line_class: line_classes) {
+      double min_distance = std::numeric_limits<double>::max();
+      std::size_t nearest_index = 0;
+      for (std::size_t j = 0; j < line_class.geometries.size(); ++j) {
+        OGREnvelope line_envelope;
+        line_class.geometries[j]->getEnvelope(&line_envelope);
+        if (line_envelope.MaxX < x_min || line_envelope.MinX > x_max || line_envelope.MaxY < y_min || line_envelope.MinY > y_max) continue;
+        double distance = road_polygons[i]->Distance(line_class.geometries[j]);
+        if (distance >= 0 && distance < min_distance) {
+          min_distance = distance;
+          nearest_index = j;
+        }
+      }
+      if (min_distance < best_distance) {
+        best_distance = min_distance;
+        best_class = line_class.semantic_class;
+        best_attributes = line_class.attributes[nearest_index];
+      }
+    }
+    if (best_distance <= classification_distance) {
+      road_classes[i] = best_class;
+      road_attributes[i] = best_attributes;
+    }
+    if (road_classes[i] == "Road") ++n_road;
+    else if (road_classes[i] == "Railway") ++n_railway;
+    else if (road_classes[i] == "WaterBody") ++n_waterbody;
+  }
+  std::cout << "Classified road polygons: " << n_road << " Road, " << n_railway << " Railway, " << n_waterbody << " WaterBody." << std::endl;
+  for (auto &line_class: line_classes) {
+    for (auto *geometry: line_class.geometries) OGRGeometryFactory::destroyGeometry(geometry);
+  }
+}
+
 // Generate road polygons: union of city blocks, water bodies and land-use features, then the complement within the study area
 void generate_road_polygons(Config &config, Map &map) {
   if (config.city_blocks_path.empty()) {
@@ -974,6 +1097,11 @@ void generate_road_polygons(Config &config, Map &map) {
   }
   std::cout << "Road polygons: " << road_polygons.size() << std::endl;
   
+  // Classify the gaps by proximity to INEGI line layers (Road/Railway/WaterBody)
+  std::vector<std::string> road_classes(road_polygons.size(), "Road");
+  std::vector<std::map<std::string, std::string>> road_attributes(road_polygons.size());
+  classify_road_polygons(config, road_polygons, road_classes, road_attributes);
+  
   // Write to output file if requested
   if (!config.roads_output_path.empty()) {
     GDALDriver *driver = GetGDALDriverManager()->GetDriverByName("GPKG");
@@ -988,9 +1116,13 @@ void generate_road_polygons(Config &config, Map &map) {
         output_srs.SetFromUserInput(("EPSG:" + map.crs_code).c_str());
         OGRLayer *layer = output->CreateLayer("Road", &output_srs, wkbPolygon, NULL);
         if (layer != NULL) {
-          for (auto const &road_polygon: road_polygons) {
+          OGRFieldDefn class_field("class", OFTString);
+          class_field.SetWidth(16);
+          layer->CreateField(&class_field);
+          for (std::size_t i = 0; i < road_polygons.size(); ++i) {
             OGRFeature *feature = OGRFeature::CreateFeature(layer->GetLayerDefn());
-            feature->SetGeometry(road_polygon);
+            feature->SetGeometry(road_polygons[i]);
+            feature->SetField("class", road_classes[i].c_str());
             if (layer->CreateFeature(feature) != OGRERR_NONE) {
               std::cerr << "Error: Could not write road polygon." << std::endl;
             } OGRFeature::DestroyFeature(feature);
@@ -1002,11 +1134,15 @@ void generate_road_polygons(Config &config, Map &map) {
   }
   
   // Inject into the map
-  std::size_t n_road = 0;
-  for (auto const &road_polygon: road_polygons) {
+  std::size_t n_road = 0, n_railway = 0, n_waterbody = 0;
+  for (std::size_t i = 0; i < road_polygons.size(); ++i) {
+    OGRPolygon *road_polygon = road_polygons[i];
     map.polygons.emplace_back();
-    map.polygons.back().id = "road-" + std::to_string(n_road++);
-    map.polygons.back().semantic_class = "Road";
+    if (road_classes[i] == "Railway") map.polygons.back().id = "railway-" + std::to_string(n_railway++);
+    else if (road_classes[i] == "WaterBody") map.polygons.back().id = "waterbody-" + std::to_string(n_waterbody++);
+    else map.polygons.back().id = "road-" + std::to_string(n_road++);
+    map.polygons.back().semantic_class = road_classes[i];
+    for (auto const &attribute: road_attributes[i]) map.polygons.back().attributes[attribute.first] = attribute.second;
     OGRLinearRing *outer_ring = road_polygon->getExteriorRing();
     for (int current_vertex = 0; current_vertex < outer_ring->getNumPoints(); ++current_vertex) {
       map.polygons.back().outer_ring.points.emplace_back(outer_ring->getX(current_vertex), outer_ring->getY(current_vertex));
@@ -1188,7 +1324,7 @@ void mask_building_areas(const Config &config, Map &map) {
   // Rasterize forbidden areas (Road, WaterBody, PlantCover) into a mask
   std::vector<OGRGeometryH> geometries;
   for (auto const &polygon: map.polygons) {
-    if (polygon.semantic_class != "Road" && polygon.semantic_class != "WaterBody" && polygon.semantic_class != "PlantCover") continue;
+    if (polygon.semantic_class != "Road" && polygon.semantic_class != "Railway" && polygon.semantic_class != "WaterBody" && polygon.semantic_class != "PlantCover") continue;
     OGRPolygon *ogr_polygon = new OGRPolygon();
     OGRLinearRing *ogr_outer = new OGRLinearRing();
     for (auto const &point: polygon.outer_ring.points) ogr_outer->addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
@@ -1765,6 +1901,7 @@ int main(int argc, const char * argv[]) {
   
   lift_flat_polygons("Building", map, dsm, dsm_index, config.building_height_percentile);
   lift_polygon_vertices("Road", map, dsm, dsm_index, dtm);
+  lift_polygon_vertices("Railway", map, dsm, dsm_index, dtm);
   lift_polygons("PlantCover", map, dsm, dsm_index, dtm);
   lift_polygon_vertices("WaterBody", map, dsm, dsm_index, dtm);
   lift_polygon_vertices("Terrain", map, dsm, dsm_index, dtm);
