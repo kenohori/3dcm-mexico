@@ -1515,6 +1515,104 @@ std::size_t add_clipped_polygon_to_map(OGRPolygon *clipped_polygon, Map &map, co
   } return 1;
 }
 
+// Convert a map polygon to an OGR polygon geometry (rings are closed)
+OGRPolygon *polygon_to_ogr(const Polygon &polygon) {
+  OGRLinearRing *outer_ring = new OGRLinearRing();
+  for (auto const &point: polygon.outer_ring.points) outer_ring->addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
+  outer_ring->closeRings();
+  OGRPolygon *ogr_polygon = new OGRPolygon();
+  ogr_polygon->addRingDirectly(outer_ring);
+  for (auto const &ring: polygon.inner_rings) {
+    OGRLinearRing *inner_ring = new OGRLinearRing();
+    for (auto const &point: ring.points) inner_ring->addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
+    inner_ring->closeRings();
+    ogr_polygon->addRingDirectly(inner_ring);
+  } return ogr_polygon;
+}
+
+// Subtract the given geometry from a polygon, appending the resulting polygon(s) (with the source's class, id and attributes) to the destination vector
+void subtract_geometry(const Polygon &source, OGRGeometry *subtractor, std::vector<Polygon> &destination) {
+  if (subtractor == NULL || subtractor->IsEmpty()) {
+    destination.push_back(source);
+    return;
+  }
+  OGRPolygon *ogr_polygon = polygon_to_ogr(source);
+  OGRGeometry *result = ogr_polygon->Difference(subtractor);
+  OGRGeometryFactory::destroyGeometry(ogr_polygon);
+  if (result == NULL || result->IsEmpty()) {
+    if (result != NULL) OGRGeometryFactory::destroyGeometry(result);
+    return;
+  }
+  std::vector<OGRPolygon*> result_polygons;
+  OGRwkbGeometryType result_type = wkbFlatten(result->getGeometryType());
+  if (result_type == wkbPolygon) result_polygons.push_back(result->toPolygon());
+  else if (result_type == wkbMultiPolygon) {
+    OGRMultiPolygon *multipolygon = result->toMultiPolygon();
+    for (int current_polygon = 0; current_polygon < multipolygon->getNumGeometries(); ++current_polygon) {
+      result_polygons.push_back(multipolygon->getGeometryRef(current_polygon));
+    }
+  }
+  std::size_t piece = 1;
+  for (OGRPolygon *result_polygon: result_polygons) {
+    destination.push_back(source);
+    Polygon &new_polygon = destination.back();
+    if (piece > 1) new_polygon.id = source.id + "-" + std::to_string(piece);
+    ++piece;
+    new_polygon.outer_ring.points.clear();
+    new_polygon.inner_rings.clear();
+    OGRLinearRing *outer_ring = result_polygon->getExteriorRing();
+    for (int current_vertex = 0; current_vertex < outer_ring->getNumPoints(); ++current_vertex) {
+      new_polygon.outer_ring.points.emplace_back(outer_ring->getX(current_vertex), outer_ring->getY(current_vertex));
+    } for (int current_inner_ring = 0; current_inner_ring < result_polygon->getNumInteriorRings(); ++current_inner_ring) {
+      new_polygon.inner_rings.emplace_back();
+      OGRLinearRing *inner_ring = result_polygon->getInteriorRing(current_inner_ring);
+      for (int current_vertex = 0; current_vertex < inner_ring->getNumPoints(); ++current_vertex) {
+        new_polygon.inner_rings.back().points.emplace_back(inner_ring->getX(current_vertex), inner_ring->getY(current_vertex));
+      }
+    }
+  } OGRGeometryFactory::destroyGeometry(result);
+}
+
+// Resolve overlaps between PlantCover, WaterBody and Terrain polygons so that the
+// higher-priority class keeps the shared area (priority: WaterBody > PlantCover > Terrain)
+void resolve_area_overlaps(Map &map) {
+  // Collect the higher-priority polygons into multipolygons
+  OGRMultiPolygon waterbody_areas, plantcover_areas;
+  for (auto const &polygon: map.polygons) {
+    if (polygon.semantic_class == "WaterBody") {
+      OGRPolygon *ogr_polygon = polygon_to_ogr(polygon);
+      waterbody_areas.addGeometry(ogr_polygon);
+      OGRGeometryFactory::destroyGeometry(ogr_polygon);
+    } else if (polygon.semantic_class == "PlantCover") {
+      OGRPolygon *ogr_polygon = polygon_to_ogr(polygon);
+      plantcover_areas.addGeometry(ogr_polygon);
+      OGRGeometryFactory::destroyGeometry(ogr_polygon);
+    }
+  }
+  
+  // Union the higher-priority classes
+  OGRGeometry *waterbody_union = waterbody_areas.getNumGeometries() > 0 ? waterbody_areas.UnionCascaded() : NULL;
+  OGRGeometry *plantcover_union = plantcover_areas.getNumGeometries() > 0 ? plantcover_areas.UnionCascaded() : NULL;
+  
+  // For terrain, subtract both plant cover and water bodies
+  OGRGeometry *terrain_subtractor = NULL;
+  if (waterbody_union != NULL && plantcover_union != NULL) terrain_subtractor = waterbody_union->Union(plantcover_union);
+  else if (waterbody_union != NULL) terrain_subtractor = waterbody_union->clone();
+  else if (plantcover_union != NULL) terrain_subtractor = plantcover_union->clone();
+  
+  std::vector<Polygon> new_polygons;
+  new_polygons.reserve(map.polygons.size());
+  for (auto &polygon: map.polygons) {
+    if (polygon.semantic_class == "PlantCover") subtract_geometry(polygon, waterbody_union, new_polygons);
+    else if (polygon.semantic_class == "Terrain") subtract_geometry(polygon, terrain_subtractor, new_polygons);
+    else new_polygons.push_back(std::move(polygon));
+  } map.polygons.swap(new_polygons);
+  
+  if (terrain_subtractor != NULL) OGRGeometryFactory::destroyGeometry(terrain_subtractor);
+  if (waterbody_union != NULL) OGRGeometryFactory::destroyGeometry(waterbody_union);
+  if (plantcover_union != NULL) OGRGeometryFactory::destroyGeometry(plantcover_union);
+}
+
 // Read the polygon features of one or more comma-separated datasets, clip them to the study area, and load them into the map with the given semantic class
 std::size_t read_clipped_polygon_features(const std::string &paths, const Config &config, Map &map, const std::string &semantic_class) {
   // Study area rectangle
@@ -2381,6 +2479,10 @@ int main(int argc, const char * argv[]) {
     std::cout << "Loaded " << n_polygons << " " << path.first << " polygons." << std::endl;
     GDALClose(dataset);
   }
+
+  // Resolve overlaps between PlantCover, WaterBody and Terrain polygons so that
+  // the higher-priority class keeps the shared area (WaterBody > PlantCover > Terrain)
+  resolve_area_overlaps(map);
 
   // Mask forbidden areas in the DSM-DTM object-height raster
   if (!config.mask_output_path.empty()) mask_building_areas(config, map);
