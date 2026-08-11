@@ -46,6 +46,8 @@ The pipeline is summarised below. Everything except the initial download and til
                             │    (water areas → clip to study area)   │
                             │  • generate terrain (GEOS)              │
                             │    (city blocks → clip to study area)   │
+                            │  • resolve area overlaps (GEOS)         │
+                            │    (WaterBody > PlantCover > Terrain)   │
                             │  • extract building footprints          │
                             │    (DSM−DTM mask + region growing)      │
                             │  1. DTM → simplified TIN                │
@@ -75,13 +77,14 @@ The pipeline is summarised below. Everything except the initial download and til
 5. **Plant cover polygons** *(C++, from `area_publica_a`)* — the INEGI public areas (parks, plazas, green areas) are read and clipped to the study area (via GEOS `Intersection`, mirroring the road-generation approach), producing the `PlantCover` objects; enable with `--generate_plantcover` and provide the INEGI `area_publica_a` layer via `--public_areas`. Optionally write the generated polygons to `--plantcover_output` (a `.gpkg`). When plant cover is generated in-tool, any `--plantcover` input is ignored.
 6. **Water body polygons** *(C++, from INEGI water area layers)* — the INEGI areal water layers (`cuerpo_agua_a` water bodies, `estanque_a` ponds, `canal_a` canals, `corriente_ag_a` streams) are read (comma-separated via `--water_areas`), each clipped to the study area (via GEOS `Intersection`), and loaded into the model as `WaterBody` objects; enable with `--generate_waterbodies`. Optionally write the generated polygons to `--waterbody_output` (a `.gpkg`). When water bodies are generated in-tool, any `--waterbody` input is ignored (and the `--water_areas` layers are used as road holes instead).
 7. **Terrain polygons** *(C++, from `manzana_a`)* — the INEGI city blocks are unioned (via GEOS `UnionCascaded`) and clipped to the study area (via GEOS `Intersection`), producing the `Terrain` ground surface (the complement of the roads within the study area); enable with `--generate_terrain` (reusing the `--city_blocks` input). Optionally write the generated polygons to `--terrain_output` (a `.gpkg`). When terrain is generated in-tool, any `--terrain` input is ignored.
-8. **Preprocessing** *(C++)* — all polygons are repaired and triangulated (constrained Delaunay triangulation + odd-even interior/exterior labelling, per Ledoux et al. 2014). A simplified DTM is built as a TIN from points every 30 m, each set to the median of DTM points within a 120 m radius.
-9. **Polygon lifting** *(C++)* — three lifting rules:
+8. **Resolve area overlaps** *(C++)* — the INEGI area layers (`area_publica_a`, `cuerpo_agua_a`/`estanque_a`/`canal_a`/`corriente_ag_a`, `manzana_a`) overlap each other in the source data. After all layers are loaded into the model, the shared areas are carved out with a fixed priority **WaterBody > PlantCover > Terrain** (via GEOS `UnionCascaded`/`Difference`/`Union`), so the higher-priority class keeps the shared area and the output has no overlapping surfaces. It applies to the three classes whether they were generated in-tool or read from input layers; polygons are split (ids get a `-N` suffix) and fully-covered ones are dropped.
+9. **Preprocessing** *(C++)* — all polygons are repaired and triangulated (constrained Delaunay triangulation + odd-even interior/exterior labelling, per Ledoux et al. 2014). A simplified DTM is built as a TIN from points every 30 m, each set to the median of DTM points within a 120 m radius.
+10. **Polygon lifting** *(C++)* — three lifting rules:
    - *Flat:* each building footprint is raised to the 90th percentile of the DSM heights inside it.
    - *Vertices:* road, water body and terrain polygon vertices are interpolated from the DTM TIN.
    - *Vertices + interior points:* plant cover vertices are lifted from the TIN and interior TIN points are added, then the interior is retriangulated.
-10. **Vertical walls** *(C++)* — the gaps between differently-lifted polygons are closed (mainly building façades).
-11. **Output** *(C++)* — OBJ (with a material file for per-class colours, plus a separate terrain OBJ for debugging) and CityJSON with `Building`, `Road`, `PlantCover`, `WaterBody` and `Terrain` semantics.
+11. **Vertical walls** *(C++)* — the gaps between differently-lifted polygons are closed (mainly building façades).
+12. **Output** *(C++)* — OBJ (with a material file for per-class colours, plus a separate terrain OBJ for debugging) and CityJSON with `Building`, `Road`, `PlantCover`, `WaterBody` and `Terrain` semantics.
 
 ---
 

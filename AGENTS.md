@@ -19,7 +19,7 @@ The methodology:
 ├── elevadormx/
 │   ├── elevadormx.xcodeproj/  # Xcode project (macOS only)
 │   └── elevadormx/
-│       ├── main.cpp           # Entire pipeline (single translation unit, ~1700 lines)
+│       ├── main.cpp           # Entire pipeline (single translation unit, ~2600 lines)
 │       ├── Quadtree.h         # Spatial index for point clouds
 │       ├── Edge_map.h         # Edge adjacency index (currently unused/dead code)
 │       └── Enhanced_constrained_triangulation_2.h  # CDT with odd-even constraint insertion
