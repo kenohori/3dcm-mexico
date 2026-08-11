@@ -163,6 +163,10 @@ struct Config {
   std::string water_areas_path;
   std::string waterbody_output_path;
   
+  // Terrain polygon generation
+  bool generate_terrain = false;
+  std::string terrain_output_path;
+  
   // Apply a CLI/config-file key-value pair to this config
   void set(const std::string &key, const std::string &value) {
     if (key == "dsm") dsm_path = value;
@@ -206,6 +210,8 @@ struct Config {
     else if (key == "generate_waterbodies") generate_waterbodies = (value == "true" || value == "1");
     else if (key == "water_areas") water_areas_path = value;
     else if (key == "waterbody_output") waterbody_output_path = value;
+    else if (key == "generate_terrain") generate_terrain = (value == "true" || value == "1");
+    else if (key == "terrain_output") terrain_output_path = value;
     else if (key == "study_area") {
       // Format: x_min,y_min,x_max,y_max
       std::stringstream value_stream(value);
@@ -278,6 +284,12 @@ struct Config {
     if (generate_waterbodies) {
       std::cout << "\tWater areas (cuerpo_agua_a, estanque_a, canal_a, corriente_ag_a): " << water_areas_path << "\n";
       std::cout << "\tWater body output: " << waterbody_output_path << "\n";
+    }
+    std::cout << "Terrain polygon generation:\n";
+    std::cout << "\tGenerate terrain: " << (generate_terrain ? "yes" : "no") << "\n";
+    if (generate_terrain) {
+      std::cout << "\tCity blocks (manzana_a): " << city_blocks_path << "\n";
+      std::cout << "\tTerrain output: " << terrain_output_path << "\n";
     }
   }
 };
@@ -1633,6 +1645,88 @@ void generate_waterbodies_polygons(Config &config, Map &map) {
   if (!config.waterbody_output_path.empty()) write_polygons_to_gpkg(config.waterbody_output_path, map, "WaterBody", first_polygon);
 }
 
+// Generate terrain polygons: union of city blocks (manzana_a) clipped to the study area
+void generate_terrain_polygons(Config &config, Map &map) {
+  if (config.city_blocks_path.empty()) {
+    std::cerr << "Error: generate_terrain requires a city_blocks path." << std::endl;
+    return;
+  }
+  
+  const std::size_t first_polygon = map.polygons.size();
+  
+  // Collect the city blocks
+  OGRMultiPolygon city_block_areas;
+  std::size_t n_polygons = 0;
+  GDALDataset *dataset = (GDALDataset*) GDALOpenEx(config.city_blocks_path.c_str(), GDAL_OF_READONLY, NULL, NULL, NULL);
+  if (dataset == NULL) {
+    std::cerr << "Error: Could not open city blocks dataset: " << config.city_blocks_path << std::endl;
+    return;
+  } std::cout << "Opening city blocks type: " << dataset->GetDriverName() << std::endl;
+  read_polygon_features(dataset, config, city_block_areas, n_polygons, map);
+  GDALClose(dataset);
+  std::cout << "City blocks: " << n_polygons << std::endl;
+  
+  // Union the city blocks (GEOS handles shared/overlapping boundaries robustly)
+  OGRGeometry *city_block_union = city_block_areas.UnionCascaded();
+  if (city_block_union == NULL || city_block_union->IsEmpty()) {
+    std::cerr << "Error: City block union is empty." << std::endl;
+    return;
+  }
+  
+  // Clip to the study area
+  OGRLinearRing study_ring;
+  study_ring.addPoint(config.study_x_min, config.study_y_min);
+  study_ring.addPoint(config.study_x_max, config.study_y_min);
+  study_ring.addPoint(config.study_x_max, config.study_y_max);
+  study_ring.addPoint(config.study_x_min, config.study_y_max);
+  study_ring.addPoint(config.study_x_min, config.study_y_min);
+  OGRPolygon study_polygon;
+  study_polygon.addRing(&study_ring);
+  OGRGeometry *terrain_geom = city_block_union->Intersection(&study_polygon);
+  OGRGeometryFactory::destroyGeometry(city_block_union);
+  if (terrain_geom == NULL || terrain_geom->IsEmpty()) {
+    std::cerr << "Error: No terrain polygons could be computed." << std::endl;
+    if (terrain_geom != NULL) OGRGeometryFactory::destroyGeometry(terrain_geom);
+    return;
+  }
+  
+  // Collect resulting polygons
+  std::vector<OGRPolygon*> terrain_polygons;
+  OGRwkbGeometryType terrain_type = wkbFlatten(terrain_geom->getGeometryType());
+  if (terrain_type == wkbPolygon) {
+    terrain_polygons.push_back(terrain_geom->toPolygon());
+  } else if (terrain_type == wkbMultiPolygon) {
+    OGRMultiPolygon *multipolygon = terrain_geom->toMultiPolygon();
+    for (int current_polygon = 0; current_polygon < multipolygon->getNumGeometries(); ++current_polygon) {
+      terrain_polygons.push_back(multipolygon->getGeometryRef(current_polygon));
+    }
+  }
+  std::cout << "Terrain polygons: " << terrain_polygons.size() << std::endl;
+  
+  // Inject into the map
+  std::size_t n_terrain = 0;
+  for (std::size_t i = 0; i < terrain_polygons.size(); ++i) {
+    OGRPolygon *terrain_polygon = terrain_polygons[i];
+    map.polygons.emplace_back();
+    map.polygons.back().id = "terrain-" + std::to_string(n_terrain++);
+    map.polygons.back().semantic_class = "Terrain";
+    OGRLinearRing *outer_ring = terrain_polygon->getExteriorRing();
+    for (int current_vertex = 0; current_vertex < outer_ring->getNumPoints(); ++current_vertex) {
+      map.polygons.back().outer_ring.points.emplace_back(outer_ring->getX(current_vertex), outer_ring->getY(current_vertex));
+    } for (int current_inner_ring = 0; current_inner_ring < terrain_polygon->getNumInteriorRings(); ++current_inner_ring) {
+      map.polygons.back().inner_rings.emplace_back();
+      OGRLinearRing *inner_ring = terrain_polygon->getInteriorRing(current_inner_ring);
+      for (int current_vertex = 0; current_vertex < inner_ring->getNumPoints(); ++current_vertex) {
+        map.polygons.back().inner_rings.back().points.emplace_back(inner_ring->getX(current_vertex), inner_ring->getY(current_vertex));
+      }
+    }
+  }
+  OGRGeometryFactory::destroyGeometry(terrain_geom);
+  
+  // Write to output file if requested
+  if (!config.terrain_output_path.empty()) write_polygons_to_gpkg(config.terrain_output_path, map, "Terrain", first_polygon);
+}
+
 // Check whether a raster value is NODATA (exact or within a relative tolerance)
 bool is_nodata_value(float value, int has_nodata, double nodata) {
   if (!has_nodata) return false;
@@ -2106,7 +2200,10 @@ int main(int argc, const char * argv[]) {
     std::cout << "Plant cover will be generated in-tool; ignoring --plantcover (" << config.plantcover_path << ")" << std::endl;
   }
   if (!config.generate_roads) vector_paths["Road"] = config.road_path;
-  vector_paths["Terrain"] = config.terrain_path;
+  if (!config.generate_terrain) vector_paths["Terrain"] = config.terrain_path;
+  else if (!config.terrain_path.empty()) {
+    std::cout << "Terrain will be generated in-tool; ignoring --terrain (" << config.terrain_path << ")" << std::endl;
+  }
   
   // When building footprints are grown in-tool, the generated footprints replace the --building input
   const bool generate_buildings_in_tool = !config.grow_output_path.empty() && !config.buildings_output_path.empty();
@@ -2260,6 +2357,18 @@ int main(int argc, const char * argv[]) {
       config.study_area_set = true;
       std::cout << "Using DSM extent as study area: " << config.study_x_min << ", " << config.study_y_min << ", " << config.study_x_max << ", " << config.study_y_max << std::endl;
     } generate_waterbodies_polygons(config, map);
+  }
+  
+  // Generate terrain polygons from city blocks if requested
+  if (config.generate_terrain) {
+    if (!config.study_area_set) {
+      config.study_x_min = dsm_x_min;
+      config.study_y_min = dsm_y_min;
+      config.study_x_max = dsm_x_max;
+      config.study_y_max = dsm_y_max;
+      config.study_area_set = true;
+      std::cout << "Using DSM extent as study area: " << config.study_x_min << ", " << config.study_y_min << ", " << config.study_x_max << ", " << config.study_y_max << std::endl;
+    } generate_terrain_polygons(config, map);
   }
   
   for (auto const &path: vector_paths) {

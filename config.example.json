@@ -19,6 +19,8 @@
   "generate_waterbodies": false,
   "water_areas": "/path/to/cuerpo_agua_a.shp,/path/to/estanque_a.shp,/path/to/canal_a.shp,/path/to/corriente_ag_a.shp",
   "waterbody_output": "/path/to/water bodies.gpkg",
+  "generate_terrain": false,
+  "terrain_output": "/path/to/terrain.gpkg",
   "study_area": "476634,2142300,482533.5,2149281",
   "terrain_obj": "/path/to/terrain.obj",
   "obj": "/path/to/cdmx.obj",
