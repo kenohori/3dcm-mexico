@@ -12,7 +12,7 @@ This repository contains the code behind the paper *"Creating 3D city models of 
 
 The work is partly based on [elevador](https://github.com/kenohori/elevador), which itself draws on the methodologies of [3dfier](https://tudelft3d.github.io/3dfier/) and [City4CFD](https://github.com/tudelft3d/city4cfd).
 
-> **Note on the paper.** The published paper (see [Citing](#citing)) describes the implementation as it was at the time of writing. Since then, several steps it describes as manual — road-polygon Boolean operations, road classification from line layers, DSM−DTM masking, region growing, raster→polygon conversion and footprint simplification — have been folded into the C++ tool. This README describes the current code.
+> **Note on the paper.** The published paper (see [Citing](#citing)) describes the implementation as it was at the time of writing. Since then, several steps it describes as manual — road-polygon Boolean operations, road classification from line layers, plant cover generation from public areas, DSM−DTM masking, region growing, raster→polygon conversion and footprint simplification — have been folded into the C++ tool. This README describes the current code.
 
 ---
 
@@ -28,11 +28,10 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
                                                  │
                               ┌──────────────────┼───────────────────┐
                               ▼                  ▼                   ▼
-                       city blocks +      other polygons         DSM / DTM
-                        land use /        (water bodies,         elevation
-                        water bdry         plant cover,           rasters
-                       (road holes)        terrain from
-                                           city blocks)
+                       city blocks +      public areas +        DSM / DTM
+                        land use /        water bodies +        elevation
+                        water bdry        terrain from          rasters
+                       (road holes)       city blocks
                               │                  │                   │
                               │                  │                   │
                               └──────────────────┼───────────────────┘
@@ -41,6 +40,8 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
                             │   elevadormx (C++)                      │
                             │  • generate road polygons (GEOS)        │
                             │    (union of city blocks → complement)  │
+                            │  • generate plant cover (GEOS)          │
+                            │    (public areas → clip to study area)  │
                             │  • extract building footprints          │
                             │    (DSM−DTM mask + region growing)      │
                             │  1. DTM → simplified TIN                │
@@ -67,13 +68,14 @@ The pipeline is summarised below. Currently the steps marked *manual* are perfor
    - Region growing *(C++, `--grow_output`)* from seed points ≥ 10 m, with an adaptive height tolerance (15 m for buildings taller than 100 m, 0.75 m otherwise) and 4-connectivity.
    - Keep only footprints ≥ 45 pixels (~100 m²).
    - Polygonise the labelled raster *(C++, `--buildings_output`)*; with `--grow_output` the resulting footprints are loaded into the model automatically in the same run. Footprints are then simplified in-tool with Visvalingam–Whyatt (`--simplify_tolerance`, default 3 m ≈ 2 pixels).
-5. **Preprocessing** *(C++)* — all polygons are repaired and triangulated (constrained Delaunay triangulation + odd-even interior/exterior labelling, per Ledoux et al. 2014). A simplified DTM is built as a TIN from points every 30 m, each set to the median of DTM points within a 120 m radius.
-6. **Polygon lifting** *(C++)* — three lifting rules:
+5. **Plant cover polygons** *(C++, from `area_publica_a`)* — the INEGI public areas (parks, plazas, green areas) are read and clipped to the study area (via GEOS `Intersection`, mirroring the road-generation approach), producing the `PlantCover` objects; enable with `--generate_plantcover` and provide the INEGI `area_publica_a` layer via `--public_areas`. Optionally write the generated polygons to `--plantcover_output` (a `.gpkg`). When plant cover is generated in-tool, any `--plantcover` input is ignored.
+6. **Preprocessing** *(C++)* — all polygons are repaired and triangulated (constrained Delaunay triangulation + odd-even interior/exterior labelling, per Ledoux et al. 2014). A simplified DTM is built as a TIN from points every 30 m, each set to the median of DTM points within a 120 m radius.
+7. **Polygon lifting** *(C++)* — three lifting rules:
    - *Flat:* each building footprint is raised to the 90th percentile of the DSM heights inside it.
    - *Vertices:* road, water body and terrain polygon vertices are interpolated from the DTM TIN.
    - *Vertices + interior points:* plant cover vertices are lifted from the TIN and interior TIN points are added, then the interior is retriangulated.
-7. **Vertical walls** *(C++)* — the gaps between differently-lifted polygons are closed (mainly building façades).
-8. **Output** *(C++)* — OBJ (with a material file for per-class colours, plus a separate terrain OBJ for debugging) and CityJSON with `Building`, `Road`, `PlantCover` and `WaterBody` semantics.
+8. **Vertical walls** *(C++)* — the gaps between differently-lifted polygons are closed (mainly building façades).
+9. **Output** *(C++)* — OBJ (with a material file for per-class colours, plus a separate terrain OBJ for debugging) and CityJSON with `Building`, `Road`, `PlantCover` and `WaterBody` semantics.
 
 ---
 
@@ -139,7 +141,8 @@ elevadormx \
   --dsm      .../e14a39b3_ms.bil \
   --dtm      .../e14a39b3_mt.bil \
   --waterbody .../water\ bodies.gpkg \
-  --plantcover .../plant\ cover.gpkg \
+  --generate_plantcover true \
+  --public_areas .../area_publica_a.shp \
   --terrain  .../terrain.gpkg \
   --generate_roads true \
   --city_blocks .../manzana_a.shp \
@@ -154,21 +157,24 @@ elevadormx \
   --cityjson .../cdmx.city.json
 ```
 
-Setting both `--grow_output` and `--buildings_output` generates the building footprints and loads them into the model in the same run; `--building` is only needed when footprints are prepared separately (e.g. to reuse a previously generated `.gpkg`).
+Setting both `--grow_output` and `--buildings_output` generates the building footprints and loads them into the model in the same run; `--building` is only needed when footprints are prepared separately (e.g. to reuse a previously generated `.gpkg`). Setting `--generate_plantcover` with `--public_areas` generates the plant cover from the INEGI public areas in the same run; `--plantcover` is only needed when plant cover is prepared separately.
 
 The two raster paths (`--dsm`, `--dtm`) and the three output paths are required; the vector layers are optional and skipped with a warning if omitted. The full set of recognised options mirrors the keys in `config.example.json`:
 
 | Option | Meaning |
 |---|---|
 | `--dsm`, `--dtm` | DSM / DTM raster paths (required) |
-| `--building`, `--waterbody`, `--plantcover`, `--road`, `--terrain` | Vector layer paths (`--building` is only used when footprints are not generated in-tool) |
+| `--building`, `--waterbody`, `--plantcover`, `--road`, `--terrain` | Vector layer paths (`--building` is only used when footprints are not generated in-tool; `--plantcover` only when plant cover is not generated in-tool) |
 | `--generate_roads` | Generate road polygons from city blocks instead of reading `--road` |
 | `--city_blocks` | INEGI `manzana_a` layer (city blocks) used for road generation |
 | `--land_use` | Comma-separated land-use polygon layers to exclude from roads (e.g. `granja_a`, `ins_deportiv_a`) |
 | `--road_lines`, `--railway_lines`, `--stream_lines` | INEGI line layers (`vialidad_l`, `via_ferrea_l`, `corriente_ag_l`) noded into segments and used to classify the road area as Road/Railway/WaterBody |
 | `--line_classification_distance` | Max distance (m) from a road triangle to a line segment for it to be classified by that segment (default 50) |
 | `--roads_output` | Where to write the generated road polygons (`.gpkg`, with a `class` attribute plus the line feature attributes) |
-| `--study_area` | Bounds `x_min,y_min,x_max,y_max` to generate roads within (defaults to the DSM extent) |
+| `--generate_plantcover` | Generate plant cover polygons from INEGI public areas instead of reading `--plantcover` |
+| `--public_areas` | INEGI `area_publica_a` layer (public areas) used for plant cover generation, clipped to the study area |
+| `--plantcover_output` | Where to write the generated plant cover polygons (`.gpkg`) |
+| `--study_area` | Bounds `x_min,y_min,x_max,y_max` to generate roads/plant cover within (defaults to the DSM extent) |
 | `--terrain_obj`, `--obj`, `--cityjson` | Output paths (required) |
 | `--mask_output` | Write the object-height raster (DSM−DTM) with roads/water/green masked to NODATA |
 | `--building_mask` | Masked object-height raster to grow buildings from (defaults to `--mask_output` output) |
@@ -187,6 +193,8 @@ Build with CMake or Xcode (see [Dependencies](#dependencies)), then run. Outputs
 - `buildings_masked.tif` — object heights (DSM−DTM) with roads/water/green masked to NODATA
 - `building_labels.tif` — region-growing output (uint32 building id per pixel)
 - `building_footprints.gpkg` — polygonised building footprints (loaded into the model automatically)
+- `roads.gpkg` — generated road polygons (when `--roads_output` is set)
+- `plant cover.gpkg` — generated plant cover polygons (when `--plantcover_output` is set)
 - `cdmx.obj` — full 3D model for visualisation
 - `cdmx.city.json` — CityJSON model with semantics
 
