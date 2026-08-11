@@ -158,6 +158,11 @@ struct Config {
   std::string public_areas_path;
   std::string plantcover_output_path;
   
+  // Water body polygon generation
+  bool generate_waterbodies = false;
+  std::string water_areas_path;
+  std::string waterbody_output_path;
+  
   // Apply a CLI/config-file key-value pair to this config
   void set(const std::string &key, const std::string &value) {
     if (key == "dsm") dsm_path = value;
@@ -198,6 +203,9 @@ struct Config {
     else if (key == "generate_plantcover") generate_plantcover = (value == "true" || value == "1");
     else if (key == "public_areas") public_areas_path = value;
     else if (key == "plantcover_output") plantcover_output_path = value;
+    else if (key == "generate_waterbodies") generate_waterbodies = (value == "true" || value == "1");
+    else if (key == "water_areas") water_areas_path = value;
+    else if (key == "waterbody_output") waterbody_output_path = value;
     else if (key == "study_area") {
       // Format: x_min,y_min,x_max,y_max
       std::stringstream value_stream(value);
@@ -250,7 +258,7 @@ struct Config {
     std::cout << "\tGenerate roads: " << (generate_roads ? "yes" : "no") << "\n";
     if (generate_roads) {
       std::cout << "\tCity blocks: " << city_blocks_path << "\n";
-      std::cout << "\tWater bodies: " << waterbody_path << "\n";
+      std::cout << "\tWater bodies: " << (generate_waterbodies ? water_areas_path : waterbody_path) << "\n";
       std::cout << "\tLand use: " << land_use_path << "\n";
       std::cout << "\tRoads output: " << roads_output_path << "\n";
       std::cout << "\tStudy area: " << study_x_min << ", " << study_y_min << ", " << study_x_max << ", " << study_y_max << "\n";
@@ -264,6 +272,12 @@ struct Config {
     if (generate_plantcover) {
       std::cout << "\tPublic areas (area_publica_a): " << public_areas_path << "\n";
       std::cout << "\tPlant cover output: " << plantcover_output_path << "\n";
+    }
+    std::cout << "Water body polygon generation:\n";
+    std::cout << "\tGenerate water bodies: " << (generate_waterbodies ? "yes" : "no") << "\n";
+    if (generate_waterbodies) {
+      std::cout << "\tWater areas (cuerpo_agua_a, estanque_a, canal_a, corriente_ag_a): " << water_areas_path << "\n";
+      std::cout << "\tWater body output: " << waterbody_output_path << "\n";
     }
   }
 };
@@ -1319,7 +1333,20 @@ void generate_road_polygons(Config &config, Map &map) {
   GDALClose(dataset);
   std::cout << "City blocks: " << n_polygons << std::endl;
   
-  if (!config.waterbody_path.empty()) {
+  if (config.generate_waterbodies) {
+    for (auto const &water_areas_path: split_paths(config.water_areas_path)) {
+      n_polygons = 0;
+      dataset = (GDALDataset*) GDALOpenEx(water_areas_path.c_str(), GDAL_OF_READONLY, NULL, NULL, NULL);
+      if (dataset == NULL) {
+        std::cerr << "Error: Could not open water areas dataset: " << water_areas_path << std::endl;
+      } else {
+        std::cout << "Opening water areas type: " << dataset->GetDriverName() << std::endl;
+        read_polygon_features(dataset, config, non_road_areas, n_polygons, map);
+        GDALClose(dataset);
+        std::cout << "Water areas: " << n_polygons << std::endl;
+      }
+    }
+  } else if (!config.waterbody_path.empty()) {
     n_polygons = 0;
     dataset = (GDALDataset*) GDALOpenEx(config.waterbody_path.c_str(), GDAL_OF_READONLY, NULL, NULL, NULL);
     if (dataset == NULL) {
@@ -1459,19 +1486,25 @@ void generate_road_polygons(Config &config, Map &map) {
   OGRGeometryFactory::destroyGeometry(roads_geom);
 }
 
-// Generate plant cover polygons: INEGI public areas (area_publica_a) clipped to the study area
-void generate_plantcover_polygons(Config &config, Map &map) {
-  if (config.public_areas_path.empty()) {
-    std::cerr << "Error: generate_plantcover requires a public_areas path." << std::endl;
-    return;
-  }
-  
-  GDALDataset *dataset = (GDALDataset*) GDALOpenEx(config.public_areas_path.c_str(), GDAL_OF_READONLY, NULL, NULL, NULL);
-  if (dataset == NULL) {
-    std::cerr << "Error: Could not open public areas dataset: " << config.public_areas_path << std::endl;
-    return;
-  }
-  
+// Add a clipped OGR polygon to the map with the given semantic class
+std::size_t add_clipped_polygon_to_map(OGRPolygon *clipped_polygon, Map &map, const std::string &semantic_class, std::size_t polygon_index) {
+  map.polygons.emplace_back();
+  map.polygons.back().id = semantic_class + "-" + std::to_string(polygon_index);
+  map.polygons.back().semantic_class = semantic_class;
+  OGRLinearRing *outer_ring = clipped_polygon->getExteriorRing();
+  for (int current_vertex = 0; current_vertex < outer_ring->getNumPoints(); ++current_vertex) {
+    map.polygons.back().outer_ring.points.emplace_back(outer_ring->getX(current_vertex), outer_ring->getY(current_vertex));
+  } for (int current_inner_ring = 0; current_inner_ring < clipped_polygon->getNumInteriorRings(); ++current_inner_ring) {
+    map.polygons.back().inner_rings.emplace_back();
+    OGRLinearRing *inner_ring = clipped_polygon->getInteriorRing(current_inner_ring);
+    for (int current_vertex = 0; current_vertex < inner_ring->getNumPoints(); ++current_vertex) {
+      map.polygons.back().inner_rings.back().points.emplace_back(inner_ring->getX(current_vertex), inner_ring->getY(current_vertex));
+    }
+  } return 1;
+}
+
+// Read the polygon features of one or more comma-separated datasets, clip them to the study area, and load them into the map with the given semantic class
+std::size_t read_clipped_polygon_features(const std::string &paths, const Config &config, Map &map, const std::string &semantic_class) {
   // Study area rectangle
   OGRLinearRing study_ring;
   study_ring.addPoint(config.study_x_min, config.study_y_min);
@@ -1483,109 +1516,121 @@ void generate_plantcover_polygons(Config &config, Map &map) {
   study_polygon.addRing(&study_ring);
   
   std::size_t n_polygons = 0;
-  for (auto &&input_layer: dataset->GetLayers()) {
-    input_layer->ResetReading();
-    input_layer->SetSpatialFilterRect(config.study_x_min, config.study_y_min, config.study_x_max, config.study_y_max);
-    
-    // Extract CRS from this layer
-    const OGRSpatialReference *spatial_reference = input_layer->GetSpatialRef();
-    if (spatial_reference != NULL) {
-      const char *authority = spatial_reference->GetAuthorityName(NULL);
-      if (authority != NULL) map.crs_authority = std::string(authority);
-      const char *code = spatial_reference->GetAuthorityCode(NULL);
-      if (code != NULL) map.crs_code = std::string(code);
+  for (auto const &path: split_paths(paths)) {
+    GDALDataset *dataset = (GDALDataset*) GDALOpenEx(path.c_str(), GDAL_OF_READONLY, NULL, NULL, NULL);
+    if (dataset == NULL) {
+      std::cerr << "Error: Could not open dataset: " << path << std::endl;
+      continue;
     }
-    
-    OGRFeature *input_feature;
-    while ((input_feature = input_layer->GetNextFeature()) != NULL) {
-      if (!input_feature->GetGeometryRef()) continue;
+    for (auto &&input_layer: dataset->GetLayers()) {
+      input_layer->ResetReading();
+      input_layer->SetSpatialFilterRect(config.study_x_min, config.study_y_min, config.study_x_max, config.study_y_max);
       
-      // Clip each feature to the study area (GEOS handles boundary cases robustly)
-      OGRGeometry *clipped = input_feature->GetGeometryRef()->Intersection(&study_polygon);
-      if (clipped == NULL || clipped->IsEmpty()) {
-        if (clipped != NULL) OGRGeometryFactory::destroyGeometry(clipped);
-        continue;
+      // Extract CRS from this layer
+      const OGRSpatialReference *spatial_reference = input_layer->GetSpatialRef();
+      if (spatial_reference != NULL) {
+        const char *authority = spatial_reference->GetAuthorityName(NULL);
+        if (authority != NULL) map.crs_authority = std::string(authority);
+        const char *code = spatial_reference->GetAuthorityCode(NULL);
+        if (code != NULL) map.crs_code = std::string(code);
       }
       
-      OGRwkbGeometryType clipped_type = wkbFlatten(clipped->getGeometryType());
-      if (clipped_type == wkbPolygon) {
-        OGRPolygon *clipped_polygon = clipped->toPolygon();
-        map.polygons.emplace_back();
-        map.polygons.back().id = "PlantCover-" + std::to_string(n_polygons);
-        map.polygons.back().semantic_class = "PlantCover";
-        OGRLinearRing *outer_ring = clipped_polygon->getExteriorRing();
-        for (int current_vertex = 0; current_vertex < outer_ring->getNumPoints(); ++current_vertex) {
-          map.polygons.back().outer_ring.points.emplace_back(outer_ring->getX(current_vertex), outer_ring->getY(current_vertex));
-        } for (int current_inner_ring = 0; current_inner_ring < clipped_polygon->getNumInteriorRings(); ++current_inner_ring) {
-          map.polygons.back().inner_rings.emplace_back();
-          OGRLinearRing *inner_ring = clipped_polygon->getInteriorRing(current_inner_ring);
-          for (int current_vertex = 0; current_vertex < inner_ring->getNumPoints(); ++current_vertex) {
-            map.polygons.back().inner_rings.back().points.emplace_back(inner_ring->getX(current_vertex), inner_ring->getY(current_vertex));
-          }
-        } ++n_polygons;
-      } else if (clipped_type == wkbMultiPolygon) {
-        OGRMultiPolygon *clipped_multipolygon = clipped->toMultiPolygon();
-        for (int current_polygon = 0; current_polygon < clipped_multipolygon->getNumGeometries(); ++current_polygon) {
-          OGRPolygon *clipped_polygon = clipped_multipolygon->getGeometryRef(current_polygon);
-          map.polygons.emplace_back();
-          map.polygons.back().id = "PlantCover-" + std::to_string(n_polygons);
-          map.polygons.back().semantic_class = "PlantCover";
-          OGRLinearRing *outer_ring = clipped_polygon->getExteriorRing();
-          for (int current_vertex = 0; current_vertex < outer_ring->getNumPoints(); ++current_vertex) {
-            map.polygons.back().outer_ring.points.emplace_back(outer_ring->getX(current_vertex), outer_ring->getY(current_vertex));
-          } for (int current_inner_ring = 0; current_inner_ring < clipped_polygon->getNumInteriorRings(); ++current_inner_ring) {
-            map.polygons.back().inner_rings.emplace_back();
-            OGRLinearRing *inner_ring = clipped_polygon->getInteriorRing(current_inner_ring);
-            for (int current_vertex = 0; current_vertex < inner_ring->getNumPoints(); ++current_vertex) {
-              map.polygons.back().inner_rings.back().points.emplace_back(inner_ring->getX(current_vertex), inner_ring->getY(current_vertex));
-            }
-          } ++n_polygons;
+      OGRFeature *input_feature;
+      while ((input_feature = input_layer->GetNextFeature()) != NULL) {
+        if (!input_feature->GetGeometryRef()) continue;
+        
+        // Clip each feature to the study area (GEOS handles boundary cases robustly)
+        OGRGeometry *clipped = input_feature->GetGeometryRef()->Intersection(&study_polygon);
+        if (clipped == NULL || clipped->IsEmpty()) {
+          if (clipped != NULL) OGRGeometryFactory::destroyGeometry(clipped);
+          continue;
         }
+        
+        OGRwkbGeometryType clipped_type = wkbFlatten(clipped->getGeometryType());
+        if (clipped_type == wkbPolygon) {
+          n_polygons += add_clipped_polygon_to_map(clipped->toPolygon(), map, semantic_class, n_polygons);
+        } else if (clipped_type == wkbMultiPolygon) {
+          OGRMultiPolygon *clipped_multipolygon = clipped->toMultiPolygon();
+          for (int current_polygon = 0; current_polygon < clipped_multipolygon->getNumGeometries(); ++current_polygon) {
+            n_polygons += add_clipped_polygon_to_map(clipped_multipolygon->getGeometryRef(current_polygon), map, semantic_class, n_polygons);
+          }
+        }
+        OGRGeometryFactory::destroyGeometry(clipped);
       }
-      OGRGeometryFactory::destroyGeometry(clipped);
     }
+    GDALClose(dataset);
   }
-  GDALClose(dataset);
+  return n_polygons;
+}
+
+// Write the map polygons with the given semantic class to a GPKG file
+void write_polygons_to_gpkg(const std::string &output_path, const Map &map, const std::string &semantic_class, std::size_t first_polygon) {
+  GDALDriver *driver = GetGDALDriverManager()->GetDriverByName("GPKG");
+  if (driver == NULL) {
+    std::cerr << "Error: GPKG driver not available." << std::endl;
+    return;
+  }
+  GDALDataset *output = driver->Create(output_path.c_str(), 0, 0, 0, GDT_Unknown, NULL);
+  if (output == NULL) {
+    std::cerr << "Error: Could not create " << output_path << std::endl;
+    return;
+  }
+  OGRSpatialReference output_srs;
+  output_srs.SetFromUserInput(("EPSG:" + map.crs_code).c_str());
+  OGRLayer *layer = output->CreateLayer(semantic_class.c_str(), &output_srs, wkbPolygon, NULL);
+  if (layer != NULL) {
+    for (std::size_t i = first_polygon; i < map.polygons.size(); ++i) {
+      const Polygon &polygon = map.polygons[i];
+      if (polygon.semantic_class != semantic_class) continue;
+      OGRLinearRing outer_ring;
+      for (auto const &point: polygon.outer_ring.points) outer_ring.addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
+      outer_ring.closeRings();
+      OGRPolygon polygon_geom;
+      polygon_geom.addRing(&outer_ring);
+      for (auto const &ring: polygon.inner_rings) {
+        OGRLinearRing inner_ring;
+        for (auto const &point: ring.points) inner_ring.addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
+        inner_ring.closeRings();
+        polygon_geom.addRing(&inner_ring);
+      }
+      OGRFeature *feature = OGRFeature::CreateFeature(layer->GetLayerDefn());
+      feature->SetGeometry(&polygon_geom);
+      if (layer->CreateFeature(feature) != OGRERR_NONE) {
+        std::cerr << "Error: Could not write " << semantic_class << " polygon." << std::endl;
+      } OGRFeature::DestroyFeature(feature);
+    }
+  } GDALClose(output);
+  std::cout << "Wrote " << semantic_class << " polygons to " << output_path << std::endl;
+}
+
+// Generate plant cover polygons: INEGI public areas (area_publica_a) clipped to the study area
+void generate_plantcover_polygons(Config &config, Map &map) {
+  if (config.public_areas_path.empty()) {
+    std::cerr << "Error: generate_plantcover requires a public_areas path." << std::endl;
+    return;
+  }
+  
+  const std::size_t first_polygon = map.polygons.size();
+  const std::size_t n_polygons = read_clipped_polygon_features(config.public_areas_path, config, map, "PlantCover");
   std::cout << "Plant cover polygons: " << n_polygons << std::endl;
   
   // Write to output file if requested
-  if (!config.plantcover_output_path.empty()) {
-    GDALDriver *driver = GetGDALDriverManager()->GetDriverByName("GPKG");
-    if (driver == NULL) {
-      std::cerr << "Error: GPKG driver not available." << std::endl;
-    } else {
-      GDALDataset *output = driver->Create(config.plantcover_output_path.c_str(), 0, 0, 0, GDT_Unknown, NULL);
-      if (output == NULL) {
-        std::cerr << "Error: Could not create " << config.plantcover_output_path << std::endl;
-      } else {
-        OGRSpatialReference output_srs;
-        output_srs.SetFromUserInput(("EPSG:" + map.crs_code).c_str());
-        OGRLayer *layer = output->CreateLayer("PlantCover", &output_srs, wkbPolygon, NULL);
-        if (layer != NULL) {
-          for (auto const &polygon: map.polygons) {
-            if (polygon.semantic_class != "PlantCover") continue;
-            OGRLinearRing outer_ring;
-            for (auto const &point: polygon.outer_ring.points) outer_ring.addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
-            outer_ring.closeRings();
-            OGRPolygon polygon_geom;
-            polygon_geom.addRing(&outer_ring);
-            for (auto const &ring: polygon.inner_rings) {
-              OGRLinearRing inner_ring;
-              for (auto const &point: ring.points) inner_ring.addPoint(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
-              inner_ring.closeRings();
-              polygon_geom.addRing(&inner_ring);
-            }
-            OGRFeature *feature = OGRFeature::CreateFeature(layer->GetLayerDefn());
-            feature->SetGeometry(&polygon_geom);
-            if (layer->CreateFeature(feature) != OGRERR_NONE) {
-              std::cerr << "Error: Could not write plant cover polygon." << std::endl;
-            } OGRFeature::DestroyFeature(feature);
-          }
-        } GDALClose(output);
-        std::cout << "Wrote plant cover polygons to " << config.plantcover_output_path << std::endl;
-      }
-    }
+  if (!config.plantcover_output_path.empty()) write_polygons_to_gpkg(config.plantcover_output_path, map, "PlantCover", first_polygon);
+}
+
+// Generate water body polygons: INEGI water area layers (cuerpo_agua_a, estanque_a, canal_a, corriente_ag_a) clipped to the study area
+void generate_waterbodies_polygons(Config &config, Map &map) {
+  if (config.water_areas_path.empty()) {
+    std::cerr << "Error: generate_waterbodies requires a water_areas path." << std::endl;
+    return;
   }
+  
+  const std::size_t first_polygon = map.polygons.size();
+  const std::size_t n_polygons = read_clipped_polygon_features(config.water_areas_path, config, map, "WaterBody");
+  std::cout << "Water body polygons: " << n_polygons << std::endl;
+  
+  // Write to output file if requested
+  if (!config.waterbody_output_path.empty()) write_polygons_to_gpkg(config.waterbody_output_path, map, "WaterBody", first_polygon);
 }
 
 // Check whether a raster value is NODATA (exact or within a relative tolerance)
@@ -2052,7 +2097,10 @@ int main(int argc, const char * argv[]) {
   std::map<std::string, std::string> vector_paths, raster_paths;
   raster_paths["dsm"] = config.dsm_path;
   raster_paths["dtm"] = config.dtm_path;
-  vector_paths["WaterBody"] = config.waterbody_path;
+  if (!config.generate_waterbodies) vector_paths["WaterBody"] = config.waterbody_path;
+  else if (!config.waterbody_path.empty()) {
+    std::cout << "Water bodies will be generated in-tool; ignoring --waterbody (" << config.waterbody_path << ")" << std::endl;
+  }
   if (!config.generate_plantcover) vector_paths["PlantCover"] = config.plantcover_path;
   else if (!config.plantcover_path.empty()) {
     std::cout << "Plant cover will be generated in-tool; ignoring --plantcover (" << config.plantcover_path << ")" << std::endl;
@@ -2200,6 +2248,18 @@ int main(int argc, const char * argv[]) {
       config.study_area_set = true;
       std::cout << "Using DSM extent as study area: " << config.study_x_min << ", " << config.study_y_min << ", " << config.study_x_max << ", " << config.study_y_max << std::endl;
     } generate_plantcover_polygons(config, map);
+  }
+  
+  // Generate water body polygons from INEGI water area layers if requested
+  if (config.generate_waterbodies) {
+    if (!config.study_area_set) {
+      config.study_x_min = dsm_x_min;
+      config.study_y_min = dsm_y_min;
+      config.study_x_max = dsm_x_max;
+      config.study_y_max = dsm_y_max;
+      config.study_area_set = true;
+      std::cout << "Using DSM extent as study area: " << config.study_x_min << ", " << config.study_y_min << ", " << config.study_x_max << ", " << config.study_y_max << std::endl;
+    } generate_waterbodies_polygons(config, map);
   }
   
   for (auto const &path: vector_paths) {
