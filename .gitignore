@@ -22,9 +22,14 @@
 # Xcode
 xcuserdata/
 
+# Python
+__pycache__/
+*.pyc
+
 # Build output directories
 build/
 build-cmake/
+build-cmake-release/
 DerivedData/
 
 # Local source data (INEGI rasters and vectors)

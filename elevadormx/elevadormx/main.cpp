@@ -2490,16 +2490,10 @@ int main(int argc, const char * argv[]) {
   // Extract building footprints by region growing on the masked heights
   if (!config.grow_output_path.empty()) grow_building_footprints(config);
 
-  // Load the generated building footprints into the model (single-invocation pipeline)
+  // Load the generated building footprints into the model (single-invocation pipeline), clipped to the study area
   if (generate_buildings_in_tool) {
-    GDALDataset *dataset = (GDALDataset*) GDALOpenEx(config.buildings_output_path.c_str(), GDAL_OF_READONLY, NULL, NULL, NULL);
-    if (dataset == NULL) {
-      std::cerr << "Error: Could not open generated building footprints: " << config.buildings_output_path << std::endl;
-    } else {
-      std::size_t n_generated_buildings = read_polygon_layer(dataset, "Building", map, config);
-      std::cout << "Loaded " << n_generated_buildings << " generated building footprints into the model." << std::endl;
-      GDALClose(dataset);
-    }
+    std::size_t n_generated_buildings = read_clipped_polygon_features(config.buildings_output_path, config, map, "Building");
+    std::cout << "Loaded " << n_generated_buildings << " generated building footprints (clipped to the study area) into the model." << std::endl;
   }
 
   // Basic polygon repair (pre-requisite for triangulation)
