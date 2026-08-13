@@ -109,6 +109,7 @@ struct Config {
   std::string terrain_obj_path;
   std::string obj_path;
   std::string cityjson_path;
+  std::string dsm_obj_path;
   
   // Simplified DTM TIN generation
   double dtm_cell_size = 30.0;
@@ -179,6 +180,7 @@ struct Config {
     else if (key == "terrain_obj") terrain_obj_path = value;
     else if (key == "obj") obj_path = value;
     else if (key == "cityjson") cityjson_path = value;
+    else if (key == "dsm_obj") dsm_obj_path = value;
     else if (key == "dtm_cell_size") dtm_cell_size = std::stod(value);
     else if (key == "dtm_search_radius") dtm_search_radius = std::stod(value);
     else if (key == "dtm_ratio_to_use") dtm_ratio_to_use = std::stod(value);
@@ -242,6 +244,7 @@ struct Config {
     std::cout << "\tTerrain OBJ: " << terrain_obj_path << "\n";
     std::cout << "\tOBJ: " << obj_path << "\n";
     std::cout << "\tCityJSON: " << cityjson_path << "\n";
+    std::cout << "\tDSM OBJ: " << dsm_obj_path << "\n";
     std::cout << "Parameters:\n";
     std::cout << "\tDTM cell size: " << dtm_cell_size << "\n";
     std::cout << "\tDTM search radius: " << dtm_search_radius << "\n";
@@ -840,6 +843,116 @@ void write_terrain_obj(const char *path, Triangulation &terrain) {
                                                               current_face->vertex(v)->info().z)];
     } output_stream << "\n";
   } output_stream.close();
+}
+
+// Write a direct grid translation of the DSM as a simple OBJ (two triangles per raster cell,
+// one vertex per pixel centre; NODATA cells are skipped, leaving holes). When a study area is
+// set, only the overlapping raster window is read, keeping small-area runs fast.
+bool is_nodata_value(float value, int has_nodata, double nodata);
+int write_dsm_obj(const char *path, GDALDataset *dsm_dataset, const Config &config) {
+  const int decimal_digits = config.decimal_digits;
+
+  GDALRasterBand *band = dsm_dataset->GetRasterBand(1);
+  if (!band) {
+    std::cerr << "Could not get raster band" << std::endl;
+    return 1;
+  }
+
+  int width = dsm_dataset->GetRasterXSize();
+  int height = dsm_dataset->GetRasterYSize();
+
+  double geotransform[6];
+  if (dsm_dataset->GetGeoTransform(geotransform) != CE_None) {
+    std::cerr << "Could not get geotransform" << std::endl;
+    return 1;
+  }
+
+  // Raster window to read: the study area when set, else the full raster
+  int x_off = 0, y_off = 0, x_size = width, y_size = height;
+  if (config.study_area_set) {
+    double inverse_geotransform[6];
+    if (GDALInvGeoTransform(geotransform, inverse_geotransform) != 1) {
+      std::cerr << "Could not invert geotransform" << std::endl;
+      return 1;
+    }
+    double corner_x[4] = {config.study_x_min, config.study_x_max, config.study_x_min, config.study_x_max};
+    double corner_y[4] = {config.study_y_min, config.study_y_min, config.study_y_max, config.study_y_max};
+    int min_col = std::numeric_limits<int>::max(), max_col = std::numeric_limits<int>::min();
+    int min_row = std::numeric_limits<int>::max(), max_row = std::numeric_limits<int>::min();
+    for (int corner = 0; corner < 4; ++corner) {
+      double col = inverse_geotransform[0] + corner_x[corner]*inverse_geotransform[1] + corner_y[corner]*inverse_geotransform[2];
+      double row = inverse_geotransform[3] + corner_x[corner]*inverse_geotransform[4] + corner_y[corner]*inverse_geotransform[5];
+      min_col = std::min(min_col, (int)std::floor(col));
+      max_col = std::max(max_col, (int)std::ceil(col));
+      min_row = std::min(min_row, (int)std::floor(row));
+      max_row = std::max(max_row, (int)std::ceil(row));
+    }
+    min_col = std::max(min_col, 0);
+    max_col = std::min(max_col, width-1);
+    min_row = std::max(min_row, 0);
+    max_row = std::min(max_row, height-1);
+    if (max_col < min_col || max_row < min_row) {
+      std::cerr << "Study area does not overlap the DSM" << std::endl;
+      return 1;
+    }
+    x_off = min_col; y_off = min_row;
+    x_size = max_col - min_col + 1;
+    y_size = max_row - min_row + 1;
+  }
+
+  int has_nodata = 0;
+  double nodata_value = band->GetNoDataValue(&has_nodata);
+
+  float *raster_data = new float[x_size*y_size];
+  if (band->RasterIO(GF_Read, x_off, y_off, x_size, y_size, raster_data, x_size, y_size, GDT_Float32, 0, 0) != CE_None) {
+    delete[] raster_data;
+    std::cerr << "Error reading raster data" << std::endl;
+    return 1;
+  }
+
+  std::ofstream output_stream(path);
+  output_stream << std::fixed;
+  output_stream << std::setprecision(decimal_digits);
+  std::vector<std::size_t> vertex_index(x_size*y_size, 0);
+  std::size_t next_vertex = 1;
+
+  auto is_valid = [&](int r, int c) -> bool {
+    float value = raster_data[r*x_size + c];
+    if (is_nodata_value(value, has_nodata, nodata_value)) return false;
+    if (std::isnan(value)) return false;
+    if (config.study_area_set) {
+      double x = geotransform[0] + (x_off+c)*geotransform[1] + (y_off+r)*geotransform[2];
+      double y = geotransform[3] + (x_off+c)*geotransform[4] + (y_off+r)*geotransform[5];
+      if (x < config.study_x_min || x > config.study_x_max || y < config.study_y_min || y > config.study_y_max) return false;
+    }
+    return true;
+  };
+
+  auto vertex_line = [&](int r, int c) -> std::size_t {
+    std::size_t &index = vertex_index[r*x_size + c];
+    if (index == 0) {
+      double x = geotransform[0] + (x_off+c)*geotransform[1] + (y_off+r)*geotransform[2];
+      double y = geotransform[3] + (x_off+c)*geotransform[4] + (y_off+r)*geotransform[5];
+      output_stream << "v " << x << " " << y << " " << raster_data[r*x_size + c] << "\n";
+      index = next_vertex++;
+    } return index;
+  };
+
+  for (int r = 0; r < y_size-1; ++r) {
+    for (int c = 0; c < x_size-1; ++c) {
+      if (!is_valid(r, c) || !is_valid(r, c+1) || !is_valid(r+1, c) || !is_valid(r+1, c+1)) continue;
+      std::size_t v00 = vertex_line(r, c);
+      std::size_t v10 = vertex_line(r+1, c);
+      std::size_t v11 = vertex_line(r+1, c+1);
+      std::size_t v01 = vertex_line(r, c+1);
+      output_stream << "f " << v00 << " " << v10 << " " << v11 << "\n";
+      output_stream << "f " << v00 << " " << v11 << " " << v01 << "\n";
+    }
+  }
+
+  output_stream.close();
+  delete[] raster_data;
+  return 0;
 }
 
 // Read polygon features from a dataset into a multipolygon (within the study area)
@@ -2272,11 +2385,31 @@ int main(int argc, const char * argv[]) {
   for (auto const &option: command_line_overrides) config.set(option.first, option.second);
   
   // Check required inputs
-  if (config.dsm_path.empty() || config.dtm_path.empty()) {
-    std::cerr << "Error: DSM and DTM paths are required (--dsm and --dtm)." << std::endl;
+  if (config.dsm_path.empty()) {
+    std::cerr << "Error: DSM path is required (--dsm)." << std::endl;
     return EXIT_FAILURE;
   }
-  
+
+  // DSM-only mode: write a direct translation of the DSM as an OBJ and exit early
+  if (!config.dsm_obj_path.empty()) {
+    std::cout << "DSM mesh mode: writing a direct DSM translation to " << config.dsm_obj_path << "\n\n";
+    config.print();
+    GDALAllRegister();
+    GDALDataset *dsm_dataset = (GDALDataset *)GDALOpen(config.dsm_path.c_str(), GA_ReadOnly);
+    if (!dsm_dataset) {
+      std::cerr << "Error: Could not open DSM dataset: " << config.dsm_path << std::endl;
+      return EXIT_FAILURE;
+    } int dsm_obj_result = write_dsm_obj(config.dsm_obj_path.c_str(), dsm_dataset, config);
+    GDALClose(dsm_dataset);
+    return dsm_obj_result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+  }
+
+  // Check required inputs for the full pipeline
+  if (config.dtm_path.empty()) {
+    std::cerr << "Error: DTM path is required (--dtm)." << std::endl;
+    return EXIT_FAILURE;
+  }
+
   // Check required outputs
   if (config.terrain_obj_path.empty() || config.obj_path.empty() || config.cityjson_path.empty()) {
     std::cerr << "Error: Output paths are required (--terrain_obj, --obj and --cityjson)." << std::endl;

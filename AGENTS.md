@@ -51,6 +51,8 @@ The Xcode project links GDAL via the `libgdal.dylib` symlink in `/opt/homebrew/l
 
 The C++ tool accepts `--key value` CLI args and/or `--config <file.json>` (JSON config overrides defaults; CLI args override the config file). Required: `--dsm`, `--dtm`, `--terrain_obj`, `--obj`, `--cityjson`. See `config.example.json` for the full key list. `main.cpp` prints the effective config on startup and validates required paths before doing any work.
 
+**DSM mesh mode (`--dsm_obj <path>`):** when set, only `--dsm` is required and the tool writes a direct grid translation of the DSM to a simple OBJ (one vertex per pixel centre, two triangles per raster cell, upward-facing, NODATA cells skipped) and exits before the DTM/vector pipeline. With `--study_area`, only the overlapping raster window is read (via `GDALInvGeoTransform`), keeping small-area runs fast; vertices are also filtered to the study area. `decimal_digits` controls OBJ precision.
+
 ## Batch runs over a full INEGI sheet
 
 `scripts/run_tiles.py` runs the pipeline once per DSM/DTM tile of a sheet, emitting one CityJSON/OBJ pair per tile with **no overlap** between adjacent outputs:

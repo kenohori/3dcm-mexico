@@ -25,6 +25,7 @@
   "terrain_obj": "/path/to/terrain.obj",
   "obj": "/path/to/cdmx.obj",
   "cityjson": "/path/to/cdmx.city.json",
+  "dsm_obj": "/path/to/dsm_mesh.obj",
   "mask_output": "/path/to/buildings_masked.tif",
   "grow_output": "/path/to/building_labels.tif",
   "buildings_output": "/path/to/building_footprints.gpkg",
