@@ -67,8 +67,8 @@ The C++ tool accepts `--key value` CLI args and/or `--config <file.json>` (JSON 
 - **Single-file architecture**: everything lives in `main.cpp`. Keep it that way until a deliberate refactor; the headers (`Quadtree.h`, `Edge_map.h`, `Enhanced_constrained_triangulation_2.h`) are template-only and owned by Ken Arroyo Ohori (GPL header).
 - **C++20** (`gnu++20`), CGAL `Exact_predicates_inexact_constructions_kernel`, GDAL/OGR for I/O, `nlohmann/json` for CityJSON.
 - Do **not** add comments unless the surrounding code already has them; match existing style (2-space indent, braces on next line, `for (...)` loops with body on the same line).
-- CityJSON output must stay valid: coordinate precision is controlled by `scale_factor` (from `config.decimal_digits`) and the transform `scale` must match the vertex encoding.
-- Semantic class names ("Building", "Road", "PlantCover", "WaterBody", "Terrain") are used verbatim as CityJSON types; "Terrain" is non-standard and a known limitation.
+- CityJSON output must stay valid: the writer produces CityJSON 2.0 (`"version": "2.0"`, validated against the 2.0.2 schema). Coordinate precision is controlled by `scale_factor` (from `config.decimal_digits`) and the transform `scale` must match the vertex encoding.
+- Semantic class names ("Building", "Road", "PlantCover", "WaterBody") are used verbatim as CityJSON types; the internal "Terrain" class is emitted as "TINRelief" (the only valid CityJSON terrain type) with `CompositeSurface` geometry (every surface is a triangle).
 
 ## Gotchas & known issues
 

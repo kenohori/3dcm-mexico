@@ -10,6 +10,7 @@
 #include <cmath>
 #include <limits>
 #include <list>
+#include <iomanip>
 
 #include <ogrsf_frmts.h>
 #include <gdal_priv.h>
@@ -439,7 +440,7 @@ int write_3dcm_cityjson(const char *path, Map &map, const Config &config) {
   // Prepare CityJSON
   nlohmann::json cityjson;
   cityjson["type"] = "CityJSON";
-  cityjson["version"] = "1.1";
+  cityjson["version"] = "2.0";
   cityjson["transform"] = nlohmann::json::object();
   cityjson["transform"]["scale"] = {scale_factor, scale_factor, scale_factor};
   cityjson["transform"]["translate"] = {x_min, y_min, z_min};
@@ -449,7 +450,9 @@ int write_3dcm_cityjson(const char *path, Map &map, const Config &config) {
   cityjson["metadata"]["geographicalExtent"] = {x_min, y_min, z_min, x_max, y_max, z_max};
   const std::chrono::time_point now{std::chrono::system_clock::now()};
   const std::chrono::year_month_day ymd{std::chrono::floor<std::chrono::days>(now)};
-  cityjson["metadata"]["referenceDate"] = std::to_string(int(ymd.year())) + "-" + std::to_string(unsigned(ymd.month())) + "-" + std::to_string(unsigned(ymd.day()));
+  std::ostringstream reference_date;
+  reference_date << int(ymd.year()) << "-" << std::setw(2) << std::setfill('0') << unsigned(ymd.month()) << "-" << std::setw(2) << unsigned(ymd.day());
+  cityjson["metadata"]["referenceDate"] = reference_date.str();
   cityjson["metadata"]["referenceSystem"] = std::string("https://www.opengis.net/def/crs/") + map.crs_authority + "/0/" + map.crs_code;
   
   // Vertices
@@ -482,13 +485,17 @@ int write_3dcm_cityjson(const char *path, Map &map, const Config &config) {
   // City objects
   for (std::vector<Polygon>::iterator current_polygon = map.polygons.begin(); current_polygon != map.polygons.end(); ++current_polygon) {
     
+    std::string cityjson_type = current_polygon->semantic_class;
+    if (cityjson_type == "Terrain") cityjson_type = "TINRelief";
+    const bool composite_surface = (cityjson_type == "TINRelief");
+    
     cityjson["CityObjects"][current_polygon->id] = nlohmann::json::object();
-    cityjson["CityObjects"][current_polygon->id]["type"] = current_polygon->semantic_class;
+    cityjson["CityObjects"][current_polygon->id]["type"] = cityjson_type;
     cityjson["CityObjects"][current_polygon->id]["geometry"] = nlohmann::json::array();
     cityjson["CityObjects"][current_polygon->id]["geometry"].push_back(nlohmann::json::object());
     cityjson["CityObjects"][current_polygon->id]["geometry"].back()["lod"] = "1.2";
     cityjson["CityObjects"][current_polygon->id]["geometry"].back()["boundaries"] = nlohmann::json::array();
-    cityjson["CityObjects"][current_polygon->id]["geometry"].back()["type"] = "MultiSurface";
+    cityjson["CityObjects"][current_polygon->id]["geometry"].back()["type"] = composite_surface ? "CompositeSurface" : "MultiSurface";
     cityjson["CityObjects"][current_polygon->id]["attributes"] = nlohmann::json::object();
     for (auto const &attribute: current_polygon->attributes) {
       cityjson["CityObjects"][current_polygon->id]["attributes"][attribute.first] = attribute.second;
